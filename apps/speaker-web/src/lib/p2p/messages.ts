@@ -69,6 +69,15 @@ export const PEER_PREFIX = 'syncmusic-';
  */
 export const FIXED_ROOM_ID = `${PEER_PREFIX}main`;
 
+/**
+ * The shared broker keeps an id reserved for a while after a host tab closes,
+ * and the id is public, so the one name can be temporarily unusable. The room
+ * is therefore a short ORDERED LIST of slots: the host takes the first free
+ * one and a speaker simply tries them in the same order until one answers.
+ * The link the user shares never changes.
+ */
+export const ROOM_SLOTS = [FIXED_ROOM_ID, ...Array.from({ length: 2 }, (_, i) => `${FIXED_ROOM_ID}-${i + 2}`)];
+
 /** Human-typeable code (no 0/O/1/I), also used as the PeerJS room id. */
 export function newRoomCode(): string {
   const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';

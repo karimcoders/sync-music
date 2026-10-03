@@ -2,7 +2,7 @@ import Peer, { DataConnection } from 'peerjs';
 import { AudioTrack, SpeakerInfo, SYNC, TransportState } from '@sync-music/protocol';
 import { projectPosition } from '@sync-music/sync-engine';
 import type { HostState } from '../hostClient';
-import { FIXED_ROOM_ID, P2PMessage, PEER_OPTIONS, codeFromRoomId } from './messages';
+import { FIXED_ROOM_ID, P2PMessage, PEER_OPTIONS, ROOM_SLOTS, codeFromRoomId } from './messages';
 import { allTracks, clearTracks, deleteTrack, putTrack } from './trackStore';
 
 /**
@@ -80,7 +80,7 @@ export class P2PHostClient {
     const base = `${location.origin}${import.meta.env.BASE_URL.replace(/\/$/, '')}`;
     // The room is permanent, so the link carries no session at all: it is the
     // same URL today and next week, which is what makes a printed QR work.
-    return this.roomId === FIXED_ROOM_ID ? `${base}/#/speaker` : `${base}/#/speaker?h=${this.roomId}&go=1`;
+    return ROOM_SLOTS.includes(this.roomId) ? `${base}/#/speaker` : `${base}/#/speaker?h=${this.roomId}&go=1`;
   }
 
   /** Short code for anyone who would rather type than open a link. */
@@ -104,9 +104,16 @@ export class P2PHostClient {
     this.set({ busy: true, error: null, info: 'Opening your room…' });
     // ONE permanent room: the same link and the same QR code work forever,
     // and nothing new has to be shared every time.
-    this.roomId = FIXED_ROOM_ID;
     try {
-      await this.openPeer(this.roomId, 3);
+      // Take the first free slot. All of them are behind the same shared link.
+      let last: any = null;
+      let opened = false;
+      for (const slot of ROOM_SLOTS) {
+        this.set({ info: `Opening your room…` });
+        try { await this.openPeer(slot, slot === FIXED_ROOM_ID ? 2 : 0); this.roomId = slot; opened = true; break; }
+        catch (e) { last = e; }
+      }
+      if (!opened) throw last ?? new Error('Could not open the room.');
       this.transport = { ...this.transport, state: 'idle', positionAtServerTime: Date.now() };
       this.set({
         sessionId: this.roomId, sessionName: name, conn: 'connected',
@@ -118,7 +125,7 @@ export class P2PHostClient {
     } catch (e: any) {
       this.set({
         error: e?.message?.includes('taken')
-          ? 'Someone else already has the room open on this link. Close the other host tab and try again.'
+          ? 'Every room slot is busy. Close any other host tab on this link and try again in a minute.'
           : (e?.message || 'Could not open the room. Check your internet connection.'),
       });
     } finally { this.set({ busy: false }); }
@@ -132,7 +139,20 @@ export class P2PHostClient {
     this.roomId = roomId;
     this.set({ busy: true, conn: 'connecting', sessionName: name, info: 'Re-opening your room…' });
     try {
-      await this.openPeer(roomId, 4);
+      try {
+        await this.openPeer(roomId, 3);
+      } catch {
+        // The broker may hold our old slot for a while after the refresh.
+        // Any other slot behind the same link is just as good — the speakers
+        // scan the list, so they will find us there.
+        let opened = false;
+        for (const slot of ROOM_SLOTS) {
+          if (slot === roomId) continue;
+          try { await this.openPeer(slot, 0); this.roomId = roomId = slot; opened = true; break; } catch {}
+        }
+        if (!opened) throw new Error('Could not re-open your room.');
+        localStorage.setItem(STORE, JSON.stringify({ roomId: this.roomId, name }));
+      }
       const stored = await allTracks();
       if (stored.length) {
         const playlist: AudioTrack[] = stored.map((t) => {
@@ -166,8 +186,12 @@ export class P2PHostClient {
         // Right after a refresh the broker may still hold the old registration
         // for a few seconds — wait it out instead of losing the room.
         if (e?.type === 'unavailable-id' && retries > 0) {
+          // The broker holds a room id for a while after the previous host
+          // tab closed or refreshed. Wait it out — this is the normal path
+          // when you reopen the host page, not an error.
           try { peer.destroy(); } catch {}
-          window.setTimeout(() => this.openPeer(id, retries - 1).then(resolve, reject), 1500);
+          this.set({ info: `Your room is still held by the previous session — reclaiming it… (${retries})` });
+          window.setTimeout(() => this.openPeer(id, retries - 1).then(resolve, reject), 2000);
           return;
         }
         reject(new Error(e?.type === 'unavailable-id'
@@ -213,11 +237,17 @@ export class P2PHostClient {
     });
 
     conn.on('data', (d) => this.onData(conn.peer, d as P2PMessage));
-    conn.on('close', () => {
+    // A speaker may briefly hold more than one channel to us (it dials every
+    // room slot in parallel and keeps the first that opens). Only forget the
+    // speaker when the channel that is actually registered goes away —
+    // otherwise a losing duplicate would knock a live speaker off the list.
+    const drop = () => {
+      if (this.conns.get(conn.peer)?.conn !== conn) return;
       this.conns.delete(conn.peer); this.latency.delete(conn.peer); this.clockReady.delete(conn.peer);
       this.publishSpeakers();
-    });
-    conn.on('error', () => { this.conns.delete(conn.peer); this.publishSpeakers(); });
+    };
+    conn.on('close', drop);
+    conn.on('error', drop);
   }
 
   private onData(peerId: string, m: P2PMessage) {

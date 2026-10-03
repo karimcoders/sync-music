@@ -2,7 +2,7 @@ import Peer, { DataConnection } from 'peerjs';
 
 import { ClockSync, DriftController, projectPosition } from '@sync-music/sync-engine';
 import { SILENT_WAV, type UiState } from '../client';
-import { P2PMessage, PEER_OPTIONS } from './messages';
+import { P2PMessage, PEER_OPTIONS, ROOM_SLOTS, FIXED_ROOM_ID } from './messages';
 
 /**
  * Direct-mode speaker.
@@ -75,7 +75,8 @@ export class P2PSpeakerClient {
         this.set({
           conn: 'reconnecting', hostOnline: false,
           info: 'Host is not online right now — retrying…',
-          error: this.retry > 4 ? 'That host is not online. Ask them to open the host page again.' : null,
+          error: this.retry > ROOM_SLOTS.length + 2
+            ? 'Nobody is hosting on this link right now. Ask them to open the host page.' : null,
         });
       } else {
         this.set({ error: 'Could not reach the connection broker.' });
@@ -84,57 +85,82 @@ export class P2PSpeakerClient {
     });
   }
 
-  private dial() {
-    const conn = this.peer!.connect(this.roomId, { reliable: true });
-    this.conn = conn;
+  /**
+   * The room is one shared link but a short list of broker slots (the public
+   * broker can keep a name reserved after a host leaves). Walk the list until
+   * a host answers — the phone never has to be told which slot is live.
+   */
 
-    // WebRTC can fail silently: if no path is found the channel simply never
-    // opens. Say so instead of spinning forever.
+  private dial() {
+    // Dial every slot AT ONCE. Scanning them one by one took seconds before a
+    // phone found the host; in parallel the first channel that opens wins and
+    // the rest are dropped.
+    const targets = this.roomId === FIXED_ROOM_ID ? ROOM_SLOTS : [this.roomId];
+    const tried = targets.map((t) => this.peer!.connect(t, { reliable: true }));
+    let won: DataConnection | null = null;
+
     const watchdog = window.setTimeout(() => {
-      if (!conn.open) {
-        this.set({
-          error: 'Could not reach the host. Both phones need internet, and the host tab must '
-            + 'stay open. If one of you is on a restricted network, try the same Wi-Fi or '
-            + 'mobile hotspot.',
-        });
-      }
+      if (won) return;
+      this.set({
+        error: 'Could not reach the host. Both phones need internet, and the host tab must '
+          + 'stay open. If one of you is on a restricted network, try the same Wi-Fi or '
+          + 'mobile hotspot.',
+      });
+      tried.forEach((c) => { try { c.close(); } catch {} });
+      this.scheduleReconnect();
     }, 12000);
     this.timers.push(watchdog);
 
-    conn.on('open', () => {
-      window.clearTimeout(watchdog);
-      this.retry = 0;
-      this.set({ conn: 'connected', sessionId: this.roomId, error: null, info: null,
-        phase: this.audioEnabled ? 'AUDIO_READY' : 'AUDIO_DISABLED', hostOnline: true });
-      this.send({ type: 'HELLO', deviceId: deviceId() });
-      // A data channel is much jitterier than a WebSocket right after it opens,
-      // and a bad offset here shows up directly as phones being apart. So we
-      // probe hard for the first few seconds and keep a steady 1 Hz afterwards;
-      // ClockSync keeps only the lowest-RTT third of the samples.
-      for (let i = 0; i < 10; i++) {
-        this.timers.push(window.setTimeout(() => this.ping(), i * 150));
-      }
-      this.timers.push(window.setInterval(() => this.ping(), 1000));
-      this.lastInbound = Date.now();
-      // PeerJS does not always fire 'close' when the host tab goes away (a
-      // refresh, a crash, a dead Wi-Fi link). The host answers every PING, so
-      // silence longer than a few seconds means the channel is gone: tear it
-      // down ourselves instead of sitting on a dead connection forever.
-      this.timers.push(window.setInterval(() => {
-        if (this.closed || this.reconnectPending) return;
-        if (Date.now() - this.lastInbound > 6000) {
-          this.set({ conn: 'reconnecting', hostOnline: false, info: 'Host went away — reconnecting…' });
-          try { this.conn?.close(); } catch {}
-          this.scheduleReconnect();
-        }
-      }, 2000));
-      this.startReporting();
+    tried.forEach((conn) => {
+      conn.on('open', () => {
+        if (won) { try { conn.close(); } catch {} return; }   // a slot already answered
+        won = conn;
+        this.conn = conn;
+        window.clearTimeout(watchdog);
+        tried.forEach((o) => { if (o !== conn) { try { o.close(); } catch {} } });
+        this.onConnected(conn);
+      });
+      conn.on('data', (d) => {
+        if (won !== conn) return;
+        this.lastInbound = Date.now();
+        void this.handle(d as P2PMessage);
+      });
+      const lost = () => {
+        if (won !== conn) return;                              // a dead slot, not our host
+        this.set({ conn: 'reconnecting', hostOnline: false });
+        this.scheduleReconnect();
+      };
+      conn.on('close', lost);
+      conn.on('error', lost);
     });
-
-    conn.on('data', (d) => { this.lastInbound = Date.now(); void this.handle(d as P2PMessage); });
-    conn.on('close', () => { this.set({ conn: 'reconnecting', hostOnline: false }); this.scheduleReconnect(); });
-    conn.on('error', () => { this.set({ conn: 'reconnecting', hostOnline: false }); this.scheduleReconnect(); });
   }
+
+  private onConnected(conn: DataConnection) {
+    this.retry = 0;
+    this.set({ conn: 'connected', sessionId: conn.peer, error: null, info: null,
+      phase: this.audioEnabled ? 'AUDIO_READY' : 'AUDIO_DISABLED', hostOnline: true });
+    this.send({ type: 'HELLO', deviceId: deviceId() });
+    // A data channel is much jitterier than a WebSocket right after it opens,
+    // and a bad offset here shows up directly as phones being apart. So we
+    // probe hard for the first few seconds and keep a steady 1 Hz afterwards;
+    // ClockSync keeps only the lowest-RTT third of the samples.
+    for (let i = 0; i < 10; i++) this.timers.push(window.setTimeout(() => this.ping(), i * 150));
+    this.timers.push(window.setInterval(() => this.ping(), 1000));
+    this.lastInbound = Date.now();
+    // PeerJS does not always fire 'close' when the host tab goes away (a
+    // refresh, a crash, a dead Wi-Fi link). The host answers every PING, so
+    // silence longer than a few seconds means the channel is gone.
+    this.timers.push(window.setInterval(() => {
+      if (this.closed || this.reconnectPending) return;
+      if (Date.now() - this.lastInbound > 6000) {
+        this.set({ conn: 'reconnecting', hostOnline: false, info: 'Host went away — reconnecting…' });
+        try { this.conn?.close(); } catch {}
+        this.scheduleReconnect();
+      }
+    }, 2000));
+    this.startReporting();
+  }
+
 
   /**
    * A dropped chunk used to mean the file never completed and that phone stayed
@@ -157,11 +183,12 @@ export class P2PSpeakerClient {
     this.timers.push(this.chaseTimer);
   }
 
-  private scheduleReconnect() {
+  private scheduleReconnect(fixedWait?: number) {
     if (this.closed || this.reconnectPending) return;
     this.reconnectPending = true;
     this.retry++;
-    const wait = Math.min(15000, 600 * 2 ** Math.min(this.retry, 5));
+    // While we are still scanning the slot list, keep the hops quick.
+    const wait = fixedWait ?? Math.min(15000, 600 * 2 ** Math.min(this.retry, 5));
     this.timers.push(window.setTimeout(() => {
       this.reconnectPending = false;
       if (this.closed) return;
@@ -376,9 +403,27 @@ export class P2PSpeakerClient {
     this.set({ bufferedPct: Math.min(100, (end / a.duration) * 100) });
   }
 
+  /**
+   * Per-device output delay, in milliseconds.
+   *
+   * Aligning `currentTime` is not enough in the real world: every phone has
+   * its own audio output latency (decoder + mixer + Bluetooth), easily 50–250
+   * ms apart, and that is exactly what you hear as an echo between two phones.
+   * No browser API reports it, so this is a manual nudge the listener can set
+   * once per phone; it is remembered on that device.
+   */
+  get outputOffsetMs() { return Number(localStorage.getItem('sm.outOffset') || 0); }
+  setOutputOffsetMs(ms: number) {
+    const v = Math.max(-500, Math.min(500, Math.round(ms)));
+    localStorage.setItem('sm.outOffset', String(v));
+    this.set({});
+    this.realign();
+  }
+
   private targetPosition() {
     return projectPosition(
-      this.basePosition, this.baseHostTime, this.clock.now(), this.transportPlaying,
+      this.basePosition, this.baseHostTime,
+      this.clock.now() + this.outputOffsetMs, this.transportPlaying,
       this.state.duration || Infinity,
     );
   }
@@ -461,11 +506,27 @@ export class P2PSpeakerClient {
 
   private correctDrift() {
     const a = this.audio;
-    if (!a || !this.audioEnabled || !this.transportPlaying || a.paused || !this.clock.synced) {
+    // Wait for a usable offset, not a perfect one: right after a (re)connect
+    // the estimate is still settling, and refusing to correct during those
+    // seconds is exactly when a phone drifts audibly away from the others.
+    const usable = this.clock.synced || this.clock.sampleCount >= 3;
+    if (!a || !this.audioEnabled || !this.transportPlaying || a.paused || !usable) {
       if (a) this.set({ position: a.currentTime });
       return;
     }
     const target = this.targetPosition();
+    const err = a.currentTime - target;
+    // Safety net above the normal policy: a phone that is more than ~120 ms
+    // out is plainly audible as an echo, and nudging playbackRate would take
+    // tens of seconds to close that. Snap it, then let the gentle loop keep it
+    // there. (Below this the policy still prefers an inaudible rate change.)
+    if (Math.abs(err) > 0.12) {
+      try { a.currentTime = target; } catch {}
+      a.playbackRate = 1;
+      this.set({ position: a.currentTime, driftMs: Math.round(err * 1000), phase: 'PLAYING' });
+      this.updateBuffered();
+      return;
+    }
     const c = this.drift.evaluate(a.currentTime, target);
     if (c.action === 'rate') a.playbackRate = c.rate;
     if (c.action === 'seek') { a.currentTime = c.targetPosition; a.playbackRate = 1; }

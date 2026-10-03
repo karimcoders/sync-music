@@ -152,3 +152,32 @@ Three changes asked for after testing on real phones:
 
 Measured locally, 3 speakers: 22.9 ms spread including a late joiner, 2.9 ms
 after a host refresh, and the host's own output within 50 ms of the speakers.
+
+## Why "nothing changed" on a real phone — and the latency work
+
+Two separate problems, both fixed:
+
+1. **The phone was running an old build.** The service worker was cache-first
+   for *everything*, including `index.html`, so a phone that had opened the
+   site once kept that version for days. It is now network-first for HTML and
+   cache-first only for Vite's content-hashed assets (which can never go
+   stale), the old caches are deleted on activation, and the page reloads once
+   when a new worker takes over. Every screen also prints `build <date time>`
+   in the footer so you can check on the phone itself.
+2. **Audible lag between phones.** Three changes:
+   * The drift loop no longer waits for a *perfect* clock estimate; three
+     samples are enough. Refusing to correct during the first seconds after a
+     (re)connect was exactly when a phone drifted audibly away.
+   * Above ~120 ms the speaker snaps to the timeline immediately instead of
+     nudging `playbackRate` (which needs tens of seconds to close that gap).
+   * Every device has its own audio output delay (decoder, mixer, Bluetooth) —
+     50–250 ms apart, and no browser API reports it. The speaker page now has
+     a **−/+ 20 ms fine-tune** (and a slider) that is remembered on that phone.
+     If one phone still echoes, nudge it there; that is the honest fix, not a
+     claim of perfect sync.
+
+Room slots: the public broker can keep an id reserved after a host leaves, so
+the single link now maps to a short ordered list of slots. The host takes the
+first free one; a speaker dials all of them **in parallel** and keeps the first
+that answers. The shared URL never changes. Also fixed: a losing duplicate
+channel used to knock the live speaker off the host's list.

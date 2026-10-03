@@ -226,6 +226,37 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
             </span>
           </Row>
           {s.muted && <div className="warn-text center" style={{ marginTop: 10 }}>Muted by the host</div>}
+          {c instanceof P2PSpeakerClient && (
+            <>
+              <div style={{ height: 14 }} />
+              <div className="kicker">Fine-tune this phone</div>
+              <p className="tiny" style={{ margin: '4px 0 8px' }}>
+                Every phone has its own audio output delay, so two phones can still echo even
+                when their clocks agree. If this one sounds <b>late</b>, drag right; if it sounds
+                <b> early</b>, drag left. It is remembered on this phone.
+              </p>
+              <Row>
+                <button className="chip" data-testid="nudge-minus"
+                  onClick={() => { c.setOutputOffsetMs(c.outputOffsetMs - 20); setS({ ...c.state }); }}>
+                  −20 ms
+                </button>
+                <span className="mono" data-testid="nudge-value">{c.outputOffsetMs > 0 ? '+' : ''}{c.outputOffsetMs} ms</span>
+                <button className="chip" data-testid="nudge-plus"
+                  onClick={() => { c.setOutputOffsetMs(c.outputOffsetMs + 20); setS({ ...c.state }); }}>
+                  +20 ms
+                </button>
+              </Row>
+              <input
+                type="range" min={-300} max={300} step={10} value={c.outputOffsetMs}
+                onChange={(e) => { c.setOutputOffsetMs(+e.target.value); setS({ ...c.state }); }}
+              />
+              {c.outputOffsetMs !== 0 && (
+                <button className="chip" onClick={() => { c.setOutputOffsetMs(0); setS({ ...c.state }); }}>
+                  Reset to 0
+                </button>
+              )}
+            </>
+          )}
           <div className="tiny" style={{ marginTop: 12 }}>
             Volume stays on your phone. Keep the screen on for the steadiest timing.
           </div>
@@ -241,7 +272,9 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
           </Stack>
         </Card>
       )}
-      <div className="footer-note">Host controls everything · you only need this tab open</div>
+      <div className="footer-note">
+        Host controls everything · you only need this tab open · build {__BUILD__}
+      </div>
     </Shell>
   );
 }

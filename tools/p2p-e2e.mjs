@@ -24,7 +24,8 @@ const host = await page();
 host.on('pageerror', (e) => console.log('  host error:', e.message));
 await host.goto(`${APP}#/host?mode=direct`, { waitUntil: 'networkidle' });
 await host.getByTestId('create-session').click();
-await host.getByTestId('playlist').waitFor({ timeout: 30000 });
+// the single permanent room can still be held by the previous run's host
+await host.getByTestId('playlist').waitFor({ timeout: 90000 });
 const link = await host.getByTestId('speaker-link').getAttribute('href');
 if (!link) fail('host did not publish a speaker link');
 if (/[?&]h=/.test(link)) fail(`the speaker link is still session-specific: ${link}`);
@@ -43,8 +44,13 @@ for (let i = 0; i < N; i++) {
   log(`✓ speaker ${i + 1} connected over WebRTC and audio enabled`);
 }
 
-await host.waitForTimeout(2000);
-const count = (await host.getByTestId('speaker-count').innerText()).trim();
+// a phone needs a moment to negotiate WebRTC and receive the track
+let count = '0';
+for (let i = 0; i < 30; i++) {
+  count = (await host.getByTestId('speaker-count').innerText()).trim();
+  if (Number(count) === N) break;
+  await host.waitForTimeout(1000);
+}
 log(`✓ host shows Connected Speakers: ${count}`);
 if (Number(count) !== N) fail(`host should see ${N} speakers, shows ${count}`);
 
@@ -132,7 +138,8 @@ if (paused2.every((s) => s.paused)) log('✓ second PAUSE reached every speaker,
 
 /* ---- the host tab must survive a refresh (room id + library persist) ---- */
 await host.reload({ waitUntil: 'networkidle' });
-await host.waitForTimeout(6000);
+// reclaiming the broker slot plus the speakers' rescan takes a few seconds
+await host.waitForTimeout(20000);
 const stillLive = await host.getByTestId('speaker-count').count();
 if (!stillLive) fail('the room disappeared after the host refreshed');
 else {

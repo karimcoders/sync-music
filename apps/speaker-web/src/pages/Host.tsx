@@ -253,6 +253,7 @@ export default function Host({ go }: { go: (p: string) => void }) {
 
       <Button variant="danger" onClick={() => c?.end()}>END SESSION</Button>
       <button className="chip" style={{ alignSelf: 'center' }} onClick={() => go('/')}>← Home</button>
+      <div className="footer-note">build {__BUILD__}</div>
     </Shell>
   );
 }
