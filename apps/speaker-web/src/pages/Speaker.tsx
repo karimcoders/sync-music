@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { SpeakerClient, type UiState } from '../lib/client';
 import { P2PSpeakerClient } from '../lib/p2p/p2pSpeaker';
-import { roomParam } from '../lib/mode';
+import { detectMode, roomParam, type Mode } from '../lib/mode';
 import { roomIdFromCode } from '../lib/p2p/messages';
 import QrScanner from '../components/QrScanner';
 import { backendOrigin, setBackend } from '../lib/backend';
@@ -19,8 +19,15 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
   const wanted = urlParam('s');          // session id straight from the host's link
   const [code, setCode] = useState('');  // typed join code
   const [scanning, setScanning] = useState(false);
+  const [mode, setMode] = useState<Mode | null>(room ? 'direct' : null);
+
+  // Without a backend there is nothing to "discover": the phone has to be
+  // pointed at a host, by QR, link or code. Decide that before connecting,
+  // otherwise a static deployment wrongly reports "can't reach the server".
+  useEffect(() => { if (!room) void detectMode().then(setMode); }, [room]);
 
   useEffect(() => {
+    if (!room && mode !== 'server') return;   // direct mode: wait for a QR/code
     // A link that carries ?h=<room> means the host has no backend and is
     // serving the session straight from its own browser (direct mode).
     const c: SpeakerClient | P2PSpeakerClient = room
@@ -45,10 +52,50 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
     void look();
     const iv = window.setInterval(() => { if (!ref.current?.state.sessionId) void look(); }, 4000);
     return () => { stopped = true; window.clearInterval(iv); c.disconnect(); };
-  }, []);
+  }, [room, mode]);
 
   const c = ref.current;
+  // NB: all hooks must run before any early return below.
   const pct = useMemo(() => (s && s.duration ? Math.min(100, (s.position / s.duration) * 100) : 0), [s]);
+
+  if (!room && mode === 'direct') {
+    return (
+      <Shell>
+        <Logo sub="Speaker" />
+        <Card>
+          <Stack gap={14} style={{ alignItems: 'center', textAlign: 'center' }}>
+            <div className="hero-emoji">📷</div>
+            <h1>Point this phone at the host</h1>
+            <p className="dim" style={{ margin: 0 }}>
+              This page is running without a server, so it cannot look for hosts by itself.
+              Scan the QR code on the host’s screen, or type the code it shows.
+            </p>
+            <Button testId="scan-qr" onClick={() => setScanning(true)}>📷  SCAN QR CODE</Button>
+            <div className="divider"><span>or enter the code</span></div>
+            <Row>
+              <input
+                className="code-input" data-testid="join-code-input" inputMode="text"
+                autoCapitalize="characters" maxLength={8} placeholder="ABC123" value={code}
+                onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+              />
+              <Button testId="join-by-code" disabled={code.length < 4} onClick={() => joinByCode(code, [], null)}>
+                JOIN
+              </Button>
+            </Row>
+          </Stack>
+        </Card>
+        {scanning && (
+          <QrScanner onClose={() => setScanning(false)}
+            onResult={(text) => { setScanning(false); openScanned(text); }} />
+        )}
+        <div className="footer-note">
+          Tip: the host page is on this same site — open it on whichever phone has the music.
+        </div>
+        <button className="chip" style={{ alignSelf: 'center' }} onClick={() => go('/')}>← Home</button>
+      </Shell>
+    );
+  }
+
   if (!s) return null;
 
   const tone = s.conn === 'connected' ? 'ok' : s.conn === 'disconnected' ? 'idle' : 'warn';
