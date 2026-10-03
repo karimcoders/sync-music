@@ -1,0 +1,46 @@
+# Publishes the SPEAKER WEB CLIENT (static) to GitHub Pages.
+#
+# Pages is static hosting: it cannot run the WebSocket backend. Set the repo
+# variable BACKEND_URL (Settings → Secrets and variables → Actions → Variables)
+# to your backend origin, e.g. https://api.yourdomain.com
+name: Deploy speaker web to Pages
+on:
+  push: { branches: [main] }
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency: { group: pages, cancel-in-progress: true }
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm install --no-audit --fund=false
+      - run: npm run build:packages
+      - name: Build speaker web
+        env:
+          VITE_BACKEND_URL: ${{ vars.BACKEND_URL }}
+          VITE_BASE: /${{ github.event.repository.name }}/
+        run: npm run build -w @sync-music/speaker-web
+      - name: SPA fallback
+        run: cp apps/speaker-web/dist/index.html apps/speaker-web/dist/404.html
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: apps/speaker-web/dist }
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,25 @@
+{
+  "name": "@sync-music/sync-engine",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.esm.json"
+  },
+  "dependencies": {
+    "@sync-music/protocol": "1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  },
+  "module": "dist/esm/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/index.js"
+    }
+  }
+}

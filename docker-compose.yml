@@ -1,0 +1,43 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  server:
+    build: { context: ., dockerfile: Dockerfile }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATA_DIR: /data
+      WEB_DIR: /app/web
+    volumes:
+      - audio-data:/data
+    depends_on:
+      redis: { condition: service_healthy }
+    # Horizontal scaling: `docker compose up --scale server=4`
+    # All instances share session state and commands through Redis pub/sub.
+    expose: ["8080"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env, e.g. suger.sh}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [server]
+
+volumes:
+  audio-data:
+  caddy-data:
+  caddy-config:

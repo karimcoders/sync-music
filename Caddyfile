@@ -1,0 +1,28 @@
+# Domain comes from the DOMAIN variable in .env (e.g. DOMAIN=suger.sh).
+# Caddy obtains and renews Let's Encrypt certificates automatically,
+# and terminates both HTTPS and WSS.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# WebSocket control gateway
+	reverse_proxy /ws* server:8080 {
+		lb_policy ip_hash
+		flush_interval -1
+	}
+
+	# Signed audio objects (HTTP Range passes straight through)
+	reverse_proxy /api/audio* server:8080 {
+		lb_policy round_robin
+	}
+
+	reverse_proxy server:8080 {
+		lb_policy round_robin
+		health_uri /healthz
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}

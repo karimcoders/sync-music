@@ -1,0 +1,16 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm install --no-audit --fund=false
+      - run: npm run build
+      - name: Assert there is no hard-coded speaker limit
+        run: |
+          ! grep -rnE "MAX_SPEAKERS *= *[0-9]+" --include=*.ts --include=*.tsx --include=*.kt .
