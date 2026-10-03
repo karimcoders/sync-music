@@ -14,6 +14,7 @@ export default function App() {
   const [state, setState] = useState<UiState | null>(null);
   const [sessions, setSessions] = useState<Discovered[]>([]);
   const [searching, setSearching] = useState(true);
+  const [discoveryFailed, setDiscoveryFailed] = useState(false);
   const clientRef = useRef<SpeakerClient | null>(null);
 
   useEffect(() => {
@@ -24,8 +25,13 @@ export default function App() {
     let stopped = false;
     const look = async () => {
       if (stopped) return;
-      const found = await c.autoConnect();
-      setSessions(found as Discovered[]);
+      try {
+        const found = await c.autoConnect();
+        setSessions(found as Discovered[]);
+        setDiscoveryFailed(false);
+      } catch {
+        setDiscoveryFailed(true);
+      }
       setSearching(false);
     };
     void look();
@@ -71,14 +77,16 @@ export default function App() {
                       <div className="dim">{x.speakerCount} speakers connected</div>
                     </div>
                   </div>
-                  <button onClick={() => clientRef.current?.connect(x.sessionId)}>CONNECT</button>
+                  <button data-testid="connect-host" onClick={() => clientRef.current?.connect(x.sessionId)}>
+                    CONNECT
+                  </button>
                 </div>
               ))}
             </>
           )}
           {s.error && <div className="err">{s.error}</div>}
         </div>
-        <BackendSetting />
+        <BackendSetting promote={discoveryFailed} />
       </div>
     );
   }
@@ -155,10 +163,13 @@ export default function App() {
  * backend of its own, so the server origin is configurable — once, here or via
  * ?api=https://… in the link the host shares.
  */
-function BackendSetting() {
+function BackendSetting({ promote }: { promote: boolean }) {
   const current = backendOrigin || location.origin;
   const [value, setValue] = useState(current);
-  const [open, setOpen] = useState(!backendOrigin && !import.meta.env.VITE_BACKEND_URL);
+  // Same-origin hosting (the Node server serves this page) needs no setup at
+  // all, so this only takes over the screen when discovery actually failed.
+  const [open, setOpen] = useState(false);
+  useEffect(() => { if (promote) setOpen(true); }, [promote]);
   if (!open) {
     return (
       <div className="center dim" style={{ fontSize: 12 }}>
@@ -181,7 +192,7 @@ function BackendSetting() {
           background: '#0f1322', color: 'var(--fg)', fontSize: 15,
         }}
       />
-      <button onClick={() => setBackend(value.trim())} disabled={!/^https?:\/\//.test(value.trim())}>
+      <button data-testid="save-backend" onClick={() => setBackend(value.trim())} disabled={!/^https?:\/\//.test(value.trim())}>
         SAVE &amp; CONNECT
       </button>
       <div className="dim" style={{ fontSize: 11 }}>

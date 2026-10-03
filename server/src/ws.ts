@@ -141,7 +141,13 @@ async function handle(hub: SessionHub, conn: Conn, msg: ClientMessage) {
 
     /* --------------------------- speaker telemetry ---------------------- */
     case 'SPEAKER_READY': {
-      if (conn.sessionId) hub.scheduleHostSnapshot(conn.sessionId, 300);
+      if (!conn.sessionId) return;
+      hub.scheduleHostSnapshot(conn.sessionId, 300);
+      // A speaker asks for this whenever it lacks the current track (just
+      // enabled audio, playlist changed, track changed, reconnected…).
+      // Answer with the authoritative state so it can load and catch up.
+      const st = hub.sessionStateMessage(conn.sessionId);
+      if (st) hub.send(conn, st);
       return;
     }
     case 'PLAYBACK_STATUS': {

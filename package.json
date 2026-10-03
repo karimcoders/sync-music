@@ -3,7 +3,11 @@
   "private": true,
   "version": "1.0.0",
   "description": "1 Host Android app -> N browser speaker phones, server-timestamp synchronized playback.",
-  "workspaces": ["packages/*", "server", "apps/speaker-web"],
+  "workspaces": [
+    "packages/*",
+    "server",
+    "apps/speaker-web"
+  ],
   "scripts": {
     "build:packages": "npm run build -w @sync-music/protocol && npm run build -w @sync-music/sync-engine",
     "build": "npm run build:packages && npm run build -w @sync-music/server && npm run build -w @sync-music/speaker-web",
@@ -11,5 +15,10 @@
     "dev:web": "npm run dev -w @sync-music/speaker-web",
     "start": "npm run start -w @sync-music/server"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "playwright": "^1.47.2"
+  }
 }

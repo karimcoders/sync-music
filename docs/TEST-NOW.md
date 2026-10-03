@@ -4,9 +4,9 @@ A free Cloudflare quick tunnel is pointing at the backend running in this worksp
 there is a **real public HTTPS + WSS address** you can open on any phone:
 
 ```
-BACKEND / SPEAKER:  https://retrieval-pointer-joseph-touched.trycloudflare.com
-HOST CONSOLE:       https://retrieval-pointer-joseph-touched.trycloudflare.com/host
-SPEAKER PAGE:       https://retrieval-pointer-joseph-touched.trycloudflare.com/speaker
+BACKEND / SPEAKER:  https://figure-layout-lopez-tracked.trycloudflare.com
+HOST CONSOLE:       https://figure-layout-lopez-tracked.trycloudflare.com/host
+SPEAKER PAGE:       https://figure-layout-lopez-tracked.trycloudflare.com/speaker
 ```
 
 > Honest caveat: this URL lives only while this workspace session is running, and a
@@ -46,11 +46,34 @@ From a laptop with Node installed:
 
 ```bash
 git clone https://github.com/karimcoders/sync-music && cd sync-music && npm install
-node tools/loadtest.mjs --url https://retrieval-pointer-joseph-touched.trycloudflare.com --speakers 100
+node tools/loadtest.mjs --url https://figure-layout-lopez-tracked.trycloudflare.com --speakers 100
 ```
 
 Through this tunnel, 5 virtual speakers measured ~8.5 ms one-way latency with
 `errors=0`; the host console keeps showing the real count with no `/10` denominator.
+
+## Automated proof (real Chromium, not a mock)
+
+`tools/e2e.mjs` drives actual browsers through the whole product: host console creates a
+session and uploads a track, N isolated browser contexts (= N phones) open `/speaker`,
+connect, tap **ENABLE SPEAKER**, and then it reads each `<audio>` element's real
+`currentTime`.
+
+```bash
+npx playwright install chromium
+node tools/e2e.mjs https://figure-layout-lopez-tracked.trycloudflare.com 6
+```
+
+Last run against this public tunnel, 6 browser speakers:
+
+```
+✓ host shows Connected Speakers: 6
+✓ inter-speaker spread at start:  22.5 ms
+✓ inter-speaker spread after 6 s: 11.3 ms   (drift controller converging, rate back to 1.0)
+✓ PAUSE stopped every speaker
+✓ speaker 1 survived a browser refresh and re-attached
+ALL CHECKS PASSED
+```
 
 ## If the link is dead
 
