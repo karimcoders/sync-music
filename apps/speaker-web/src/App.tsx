@@ -11,7 +11,8 @@ import Speaker from './pages/Speaker';
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, '');
 
 function currentPath() {
-  if (location.hash.startsWith('#/')) return location.hash.slice(1);
+  // "#/host?api=https://…" — keep only the path part.
+  if (location.hash.startsWith('#/')) return location.hash.slice(1).split('?')[0].replace(/\/+$/, '') || '/';
   const p = location.pathname.startsWith(BASE) ? location.pathname.slice(BASE.length) : location.pathname;
   return p.replace(/\/+$/, '') || '/';
 }

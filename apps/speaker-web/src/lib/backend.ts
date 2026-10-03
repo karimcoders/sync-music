@@ -14,7 +14,11 @@
 const KEY = 'sync-music.backend';
 
 function fromQuery(): string | null {
-  const p = new URLSearchParams(location.search).get('api');
+  // Accept ?api= in the normal query string AND inside a hash route
+  // ("…/#/host?api=https://my-backend"), which is what static hosts like
+  // GitHub Pages need for deep links.
+  const hashQuery = location.hash.includes('?') ? location.hash.slice(location.hash.indexOf('?') + 1) : '';
+  const p = new URLSearchParams(location.search).get('api') ?? new URLSearchParams(hashQuery).get('api');
   if (!p) return null;
   try {
     const u = new URL(p);
