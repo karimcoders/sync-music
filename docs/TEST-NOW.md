@@ -27,9 +27,9 @@ A free Cloudflare quick tunnel is pointing at the backend running in this worksp
 there is a **real public HTTPS + WSS address** you can open on any phone:
 
 ```
-BACKEND / SPEAKER:  https://figure-layout-lopez-tracked.trycloudflare.com
-HOST CONSOLE:       https://figure-layout-lopez-tracked.trycloudflare.com/host
-SPEAKER PAGE:       https://figure-layout-lopez-tracked.trycloudflare.com/speaker
+BACKEND / SPEAKER:  https://sitemap-difficulties-shopzilla-sierra.trycloudflare.com
+HOST CONSOLE:       https://sitemap-difficulties-shopzilla-sierra.trycloudflare.com/host
+SPEAKER PAGE:       https://sitemap-difficulties-shopzilla-sierra.trycloudflare.com/speaker
 ```
 
 > Honest caveat: this URL lives only while this workspace session is running, and a
@@ -69,7 +69,7 @@ From a laptop with Node installed:
 
 ```bash
 git clone https://github.com/karimcoders/sync-music && cd sync-music && npm install
-node tools/loadtest.mjs --url https://figure-layout-lopez-tracked.trycloudflare.com --speakers 100
+node tools/loadtest.mjs --url https://sitemap-difficulties-shopzilla-sierra.trycloudflare.com --speakers 100
 ```
 
 Through this tunnel, 5 virtual speakers measured ~8.5 ms one-way latency with
@@ -84,7 +84,7 @@ connect, tap **ENABLE SPEAKER**, and then it reads each `<audio>` element's real
 
 ```bash
 npx playwright install chromium
-node tools/e2e.mjs https://figure-layout-lopez-tracked.trycloudflare.com 6
+node tools/e2e.mjs https://sitemap-difficulties-shopzilla-sierra.trycloudflare.com 6
 ```
 
 Last run against this public tunnel, 6 browser speakers:
