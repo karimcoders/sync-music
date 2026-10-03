@@ -62,6 +62,7 @@ export default function Home({ go }: { go: (p: string) => void }) {
           <div className="kicker">I want to…</div>
           <Button testId="go-host" onClick={() => go('/host')}>🎛  CONTROL THE MUSIC (HOST)</Button>
           <Button testId="go-speaker" variant="ghost" onClick={() => go('/speaker')}>🔊  BE A SPEAKER</Button>
+          <Button testId="go-sound" variant="ghost" onClick={() => go('/sound')}>🎚  SOUND CHECK (MIC TOOLS)</Button>
         </Stack>
       </Card>
 

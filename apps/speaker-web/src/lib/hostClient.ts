@@ -19,6 +19,8 @@ export interface HostState {
   busy: boolean;
   error: string | null;
   info: string | null;
+  /** direct mode only: the host's microphone is live on every speaker */
+  micOn?: boolean;
 }
 
 const STORE = 'sync-music.host';

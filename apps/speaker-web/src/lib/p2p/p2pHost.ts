@@ -1,8 +1,8 @@
-import Peer, { DataConnection } from 'peerjs';
+import Peer, { DataConnection, MediaConnection } from 'peerjs';
 import { AudioTrack, SpeakerInfo, SYNC, TransportState } from '@sync-music/protocol';
 import { projectPosition } from '@sync-music/sync-engine';
 import type { HostState } from '../hostClient';
-import { FIXED_ROOM_ID, P2PMessage, PEER_OPTIONS, ROOM_SLOTS, codeFromRoomId } from './messages';
+import { BROKERS, FIXED_ROOM_ID, P2PMessage, ROOM_SLOTS, codeFromRoomId, newRoomCode, peerOptions, roomIdFromCode } from './messages';
 import { allTracks, clearTracks, deleteTrack, putTrack } from './trackStore';
 
 /**
@@ -26,6 +26,8 @@ interface Conn {
   /** last time we pushed a repair snapshot to this speaker */
   lastRepair: number;
   sending?: boolean;
+  lastBias?: number;
+  lastErr?: number;
 }
 
 const STORE = 'sync-music.p2phost';
@@ -94,6 +96,7 @@ export class P2PHostClient {
   get saved(): { sessionId: string; token: string } | null {
     try {
       const v = JSON.parse(localStorage.getItem(STORE) || 'null');
+      if (v?.roomId && typeof v.broker === 'number') this.broker = v.broker;
       return v?.roomId ? { sessionId: v.roomId, token: v.name ?? '' } : null;
     } catch { return null; }
   }
@@ -108,19 +111,37 @@ export class P2PHostClient {
       // Take the first free slot. All of them are behind the same shared link.
       let last: any = null;
       let opened = false;
-      for (const slot of ROOM_SLOTS) {
-        this.set({ info: `Opening your room…` });
-        try { await this.openPeer(slot, slot === FIXED_ROOM_ID ? 2 : 0); this.roomId = slot; opened = true; break; }
-        catch (e) { last = e; }
+      outer:
+      for (let b = 0; b < BROKERS.length; b++) {
+        // Four slots at a time: trying them one by one took a quarter of a
+        // minute whenever the broker still held a few stale ids.
+        for (let i = 0; i < ROOM_SLOTS.length; i += 4) {
+          this.set({ info: 'Opening your room…' });
+          const batch = ROOM_SLOTS.slice(i, i + 4);
+          try {
+            const slot = await this.openFirstFree(batch, b);
+            this.roomId = slot; this.broker = b; opened = true; break outer;
+          } catch (e) { last = e; }
+        }
       }
-      if (!opened) throw last ?? new Error('Could not open the room.');
+      if (!opened) {
+        // Every shared slot is held (the public broker keeps an id reserved
+        // for a while after a host leaves). Rather than refuse to start, open
+        // a private room — the invite card then shows a link that carries it.
+        this.roomId = roomIdFromCode(newRoomCode());
+        try {
+          await this.openPeer(this.roomId, 1, this.broker);
+          opened = true;
+          this.set({ info: 'The shared link was busy, so this session has its own link — share the one below.' });
+        } catch { throw last ?? new Error('Could not open the room.'); }
+      }
       this.transport = { ...this.transport, state: 'idle', positionAtServerTime: Date.now() };
       this.set({
         sessionId: this.roomId, sessionName: name, conn: 'connected',
         info: 'Direct mode — no server involved.',
       });
       this.pushTransport();
-      localStorage.setItem(STORE, JSON.stringify({ roomId: this.roomId, name }));
+      localStorage.setItem(STORE, JSON.stringify({ roomId: this.roomId, name, broker: this.broker }));
 
     } catch (e: any) {
       this.set({
@@ -140,18 +161,21 @@ export class P2PHostClient {
     this.set({ busy: true, conn: 'connecting', sessionName: name, info: 'Re-opening your room…' });
     try {
       try {
-        await this.openPeer(roomId, 3);
+        await this.openPeer(roomId, 3, this.broker);
       } catch {
         // The broker may hold our old slot for a while after the refresh.
         // Any other slot behind the same link is just as good — the speakers
         // scan the list, so they will find us there.
         let opened = false;
-        for (const slot of ROOM_SLOTS) {
-          if (slot === roomId) continue;
-          try { await this.openPeer(slot, 0); this.roomId = roomId = slot; opened = true; break; } catch {}
+        for (let b = 0; b < BROKERS.length && !opened; b++) {
+          for (let i = 0; i < ROOM_SLOTS.length && !opened; i += 4) {
+            const batch = ROOM_SLOTS.slice(i, i + 4).filter((x) => x !== roomId);
+            if (!batch.length) continue;
+            try { this.roomId = roomId = await this.openFirstFree(batch, b); opened = true; } catch {}
+          }
         }
         if (!opened) throw new Error('Could not re-open your room.');
-        localStorage.setItem(STORE, JSON.stringify({ roomId: this.roomId, name }));
+        localStorage.setItem(STORE, JSON.stringify({ roomId: this.roomId, name, broker: this.broker }));
       }
       const stored = await allTracks();
       if (stored.length) {
@@ -178,11 +202,65 @@ export class P2PHostClient {
     } finally { this.set({ busy: false }); }
   }
 
-  private openPeer(id: string, retries = 0) {
+  private broker = 0;
+
+  /**
+   * Open whichever of these slots is free, racing them. Losing peers are
+   * destroyed immediately so we never hold a room we are not using.
+   */
+  private async openFirstFree(slots: string[], broker: number): Promise<string> {
+    const peers: Peer[] = [];
+    const winner = await new Promise<{ slot: string; peer: Peer } | null>((resolve) => {
+      let pending = slots.length;
+      let done = false;
+      slots.forEach((slot) => {
+        const peer = new Peer(slot, peerOptions(broker));
+        peers.push(peer);
+        const give_up = window.setTimeout(() => settle(null), 7000);
+        const settle = (win: { slot: string; peer: Peer } | null) => {
+          window.clearTimeout(give_up);
+          if (done) return;
+          if (win) { done = true; resolve(win); return; }
+          if (--pending === 0) { done = true; resolve(null); }
+        };
+        peer.once('open', () => settle({ slot, peer }));
+        peer.once('error', () => settle(null));
+      });
+    });
+    peers.forEach((p) => { if (p !== winner?.peer) { try { p.destroy(); } catch {} } });
+    if (!winner) throw new Error('Could not reach the connection broker.');
+    this.adopt(winner.peer);
+    return winner.slot;
+  }
+
+  /** Wire the handlers an already-open peer needs. */
+  private adopt(peer: Peer) {
+    this.peer = peer;
+    peer.on('connection', (c) => this.accept(c));
+    peer.on('disconnected', () => {
+      this.set({ conn: 'reconnecting' });
+      try { peer.reconnect(); } catch {}
+    });
+    peer.on('error', (e: any) => {
+      if (e?.type === 'peer-unavailable') return;
+      if (e?.type === 'network') { this.set({ conn: 'reconnecting' }); return; }
+      this.set({ error: `Connection error: ${e?.type ?? 'unknown'}` });
+    });
+  }
+
+  private openPeer(id: string, retries = 0, broker = this.broker) {
+    this.broker = broker;
     return new Promise<void>((resolve, reject) => {
-      const peer = new Peer(id, PEER_OPTIONS);
+      const peer = new Peer(id, peerOptions(broker));
+      // Bound every attempt: walking a dozen slots is only quick if a dead
+      // broker cannot hold us for a minute.
+      const give_up = window.setTimeout(() => {
+        try { peer.destroy(); } catch {}
+        reject(new Error('The connection broker did not answer.'));
+      }, 7000);
       this.peer = peer;
       const fail = (e: any) => {
+        window.clearTimeout(give_up);
         // Right after a refresh the broker may still hold the old registration
         // for a few seconds — wait it out instead of losing the room.
         if (e?.type === 'unavailable-id' && retries > 0) {
@@ -191,14 +269,14 @@ export class P2PHostClient {
           // when you reopen the host page, not an error.
           try { peer.destroy(); } catch {}
           this.set({ info: `Your room is still held by the previous session — reclaiming it… (${retries})` });
-          window.setTimeout(() => this.openPeer(id, retries - 1).then(resolve, reject), 2000);
+          window.setTimeout(() => this.openPeer(id, retries - 1, broker).then(resolve, reject), 2000);
           return;
         }
         reject(new Error(e?.type === 'unavailable-id'
           ? 'That room id is taken, try again.'
           : 'Could not reach the connection broker.'));
       };
-      peer.once('open', () => { peer.off('error', fail); resolve(); });
+      peer.once('open', () => { window.clearTimeout(give_up); peer.off('error', fail); resolve(); });
       peer.once('error', fail);
       peer.on('connection', (c) => this.accept(c));
       peer.on('disconnected', () => {
@@ -233,6 +311,7 @@ export class P2PHostClient {
       // would replace the very blob it is playing from). Its first STATUS
       // tells us whether it needs the file.
       this.resyncOne(conn.peer);
+      if (this.micStream) this.callPeer(conn.peer);   // late joiner gets the mic too
       this.publishSpeakers();
     });
 
@@ -282,6 +361,28 @@ export class P2PHostClient {
           lastSeen: Date.now(),
         };
         this.publishSpeakers();
+
+        // --- a phone whose own clock estimate is biased (asymmetric relay):
+        // hand back half of the error we measured, at most once per 2 s.
+        const steady = Math.abs(m.selfDriftMs ?? 0) < 30;   // its audio is on ITS timeline
+        const err = Math.round(drift * 1000);
+        if (m.playing && this.transport.state === 'playing' && steady
+            && this.clockReady.get(peerId) && Math.abs(err) > 100
+            && Date.now() - (c.lastBias ?? 0) > 2500) {
+          // Only act on two consecutive measurements that agree: a single
+          // sample can be a scheduling hiccup, and correcting on noise is how
+          // a bias loop starts oscillating.
+          const prev = c.lastErr;
+          c.lastErr = err;
+          if (prev !== undefined && Math.sign(prev) === Math.sign(err) && Math.abs(prev) > 100) {
+            c.lastBias = Date.now();
+            c.lastErr = undefined;
+            const delta = Math.max(-150, Math.min(150, Math.round(-err * 0.35)));
+            this.send(c.conn, { type: 'CLOCK_BIAS', deltaMs: delta });
+          }
+        } else if (Math.abs(err) <= 100) {
+          c.lastErr = undefined;
+        }
 
         // --- repair: a speaker may have missed a command or the audio itself
         const want = track?.id ?? null;
@@ -347,6 +448,9 @@ export class P2PHostClient {
   private send(conn: DataConnection, m: P2PMessage) {
     try { if (conn.open) conn.send(m); } catch {}
   }
+  /** set whenever a transport command is sent: transfers yield to it */
+  private lastCommandAt = 0;
+
   private broadcast(m: P2PMessage) { this.conns.forEach((c) => this.send(c.conn, m)); }
 
   /* -------------------------------- library ----------------------------- */
@@ -432,6 +536,10 @@ export class P2PHostClient {
 
     for (let i = 0; i < total; i++) {
       if (!this.conns.has(peerId) || !c.conn.open) { c.sent.delete(cur.id); return; }
+      // A command must never queue behind megabytes of audio: give the
+      // channel a clear moment right after one was sent.
+      const since = Date.now() - this.lastCommandAt;
+      if (since < 150) await new Promise((r) => setTimeout(r, 150 - since));
       await this.waitForDrain(c.conn);
       this.send(c.conn, {
         type: 'TRACK_CHUNK', trackId: cur.id, index: i,
@@ -441,7 +549,7 @@ export class P2PHostClient {
   }
 
   /** Back-pressure: never let more than ~512 kB sit in the send queue. */
-  private waitForDrain(conn: DataConnection, limit = 128 * 1024) {
+  private waitForDrain(conn: DataConnection, limit = 48 * 1024) {
     const dc: RTCDataChannel | undefined = (conn as any).dataChannel;
     if (!dc || dc.bufferedAmount < limit) return Promise.resolve();
     return new Promise<void>((resolve) => {
@@ -471,6 +579,55 @@ export class P2PHostClient {
     this.files.delete(id);
     this.setPlaylist(this.transport.playlist.map((t) => t.id).filter((x) => x !== id));
   }
+
+  /* ------------------------------ microphone ---------------------------- */
+
+  private micStream: MediaStream | null = null;
+  private micCalls = new Map<string, MediaConnection>();
+
+  /**
+   * Live microphone to every speaker.
+   *
+   * This is a normal WebRTC audio track (not the scheduled file timeline), so
+   * it behaves like a PA system: lowest latency the network allows, roughly
+   * 100–250 ms over the internet, and it is NOT sample-accurate across phones
+   * the way a scheduled song is. Speak into the host, everyone hears it.
+   */
+  async toggleMic() {
+    if (this.micStream) { this.stopMic(); return; }
+    try {
+      this.micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: false,
+      });
+      this.set({ micOn: true, info: 'Microphone is live on every speaker. Keep phones apart to avoid feedback.' });
+      this.conns.forEach((_c, peerId) => this.callPeer(peerId));
+    } catch {
+      this.set({ error: 'Could not open the microphone. Allow mic access for this site and try again.' });
+    }
+  }
+
+  private callPeer(peerId: string) {
+    if (!this.micStream || !this.peer) return;
+    try {
+      const call = this.peer.call(peerId, this.micStream);
+      this.micCalls.get(peerId)?.close();
+      this.micCalls.set(peerId, call);
+      call.on('close', () => this.micCalls.delete(peerId));
+    } catch { /* that phone will get the mic on its next reconnect */ }
+  }
+
+  stopMic() {
+    this.micCalls.forEach((c) => { try { c.close(); } catch {} });
+    this.micCalls.clear();
+    this.micStream?.getTracks().forEach((t) => t.stop());
+    this.micStream = null;
+    this.set({ micOn: false, info: null });
+  }
+
+  get micLive() { return !!this.micStream; }
+  /** the live mic signal, for the host's own level meter */
+  get micSource() { return this.micStream; }
 
   /* ------------------------- the host's own output ----------------------- */
 
@@ -571,6 +728,7 @@ export class P2PHostClient {
     this.pushTransport();
     // make sure everybody has the bytes before the scheduled moment
     this.conns.forEach((_c, p) => void this.pushTrackTo(p));
+    this.lastCommandAt = Date.now();
     this.broadcast({ type: 'PLAY', seq: ++this.cmdSeq, trackId: track.id, position: pos, startAt });
     this.applyLocal();
   }
@@ -580,6 +738,7 @@ export class P2PHostClient {
     const pos = this.livePosition();
     this.transport = { ...this.transport, state: 'paused', position: pos, positionAtServerTime: Date.now() };
     this.pushTransport();
+    this.lastCommandAt = Date.now();
     this.broadcast({ type: 'PAUSE', seq: ++this.cmdSeq, position: pos });
     this.applyLocal();
   }
@@ -589,6 +748,7 @@ export class P2PHostClient {
   stop() {
     this.transport = { ...this.transport, state: 'stopped', position: 0, positionAtServerTime: Date.now() };
     this.pushTransport();
+    this.lastCommandAt = Date.now();
     this.broadcast({ type: 'STOP', seq: ++this.cmdSeq });
     this.applyLocal();
   }
@@ -599,6 +759,7 @@ export class P2PHostClient {
     const applyAt = Date.now() + SYNC.APPLY_LEAD_MS;
     this.transport = { ...this.transport, position, positionAtServerTime: applyAt };
     this.pushTransport();
+    this.lastCommandAt = Date.now();
     this.broadcast({ type: 'SEEK', seq: ++this.cmdSeq, trackId: track.id, position, applyAt });
     this.applyLocal();
   }
@@ -615,6 +776,7 @@ export class P2PHostClient {
   volume(v: number) {
     this.transport = { ...this.transport, volume: v };
     this.pushTransport();
+    this.lastCommandAt = Date.now();
     this.broadcast({ type: 'VOLUME', seq: ++this.cmdSeq, volume: v });
     this.applyLocal();
   }
@@ -670,6 +832,7 @@ export class P2PHostClient {
   }
 
   async end() {
+    this.lastCommandAt = Date.now();
     this.broadcast({ type: 'STOP', seq: ++this.cmdSeq });
     this.applyLocal();
     this.conns.forEach((c) => { try { c.conn.close(); } catch {} });

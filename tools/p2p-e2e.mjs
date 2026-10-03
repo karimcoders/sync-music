@@ -121,6 +121,31 @@ const paused2 = await Promise.all(speakers.map(probe));
 paused2.forEach((s, i) => { if (!s.paused) fail(`speaker ${i + 1} ignored the second PAUSE`); });
 if (paused2.every((s) => s.paused)) log('✓ second PAUSE reached every speaker, including the first one');
 
+/* ---- a speaker must keep playing when its screen goes off ------------ */
+{
+  const victim = speakers[0];
+  await victim.evaluate(() => {
+    // Closest thing to a locked screen we can drive: the page goes hidden.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await host.getByTestId('play').click();          // resume
+  await host.waitForTimeout(5000);
+  const hidden = await probe(victim);
+  log(`  hidden speaker: currentTime=${hidden.t.toFixed(3)} paused=${hidden.paused}`);
+  if (hidden.paused || hidden.t < 1) fail('a speaker stopped when its screen went off');
+  else log('✓ a speaker with the screen off keeps playing');
+  await victim.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await host.waitForTimeout(1500);
+  await host.getByTestId('play').click();          // back to paused for the next step
+  await host.waitForTimeout(1200);
+}
+
 /* ---- the host device must play the song too, in the same timeline ---- */
 {
   const h = await host.evaluate(() => window.__syncHost?.localAudioState ?? null);

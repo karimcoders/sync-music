@@ -2,7 +2,7 @@ import Peer, { DataConnection } from 'peerjs';
 
 import { ClockSync, DriftController, projectPosition } from '@sync-music/sync-engine';
 import { SILENT_WAV, type UiState } from '../client';
-import { P2PMessage, PEER_OPTIONS, ROOM_SLOTS, FIXED_ROOM_ID } from './messages';
+import { P2PMessage, peerOptions, ROOM_SLOTS, FIXED_ROOM_ID, BROKERS } from './messages';
 
 /**
  * Direct-mode speaker.
@@ -64,26 +64,46 @@ export class P2PSpeakerClient {
   /** Same entry point the server-mode client exposes; there is nothing to list. */
   async autoConnect() { this.connect(); return []; }
 
+  private peers: Peer[] = [];
+
   connect() {
     this.closed = false;
-    this.set({ conn: 'connecting', phase: 'CONNECTING', info: 'Connecting directly to the host…' });
-    const peer = new Peer(PEER_OPTIONS);
-    this.peer = peer;
-    peer.on('open', () => this.dial());
-    peer.on('error', (e: any) => {
-      if (e?.type === 'peer-unavailable') {
-        this.set({
-          conn: 'reconnecting', hostOnline: false,
-          info: 'Host is not online right now — retrying…',
-          error: this.retry > ROOM_SLOTS.length + 2
-            ? 'Nobody is hosting on this link right now. Ask them to open the host page.' : null,
-        });
-      } else {
-        this.set({ error: 'Could not reach the connection broker.' });
-      }
-      this.scheduleReconnect();
+    this.set({ conn: 'connecting', phase: 'CONNECTING', info: 'Looking for the host…' });
+    // Register on EVERY broker at once. The host may have had to fall back to
+    // a different one (the public one rate-limits and holds stale ids), and a
+    // phone should not spend half a minute discovering that one by one.
+    this.peers.forEach((p) => { try { p.destroy(); } catch {} });
+    this.peers = BROKERS.map((_, b) => {
+      const peer = new Peer(peerOptions(b));
+      peer.on('open', () => this.dial(peer));
+      // The host may open a live microphone; answer with no stream of our own.
+      peer.on('call', (call) => {
+        try { call.answer(); } catch { return; }
+        call.on('stream', (stream) => this.playMic(stream));
+        call.on('close', () => this.stopMic());
+      });
+      peer.on('error', (e: any) => {
+        // One broker failing is not fatal while another may still answer, and
+        // it must never disturb a connection we already have.
+        if (this.conn?.open) return;
+        if (e?.type === 'peer-unavailable') {
+          this.set({
+            conn: 'reconnecting', hostOnline: false,
+            info: 'Host is not online right now — retrying…',
+            error: this.retry > ROOM_SLOTS.length ? 'Nobody is hosting on this link right now. Ask them to open the host page.' : null,
+          });
+        }
+      });
+      return peer;
     });
+    this.peer = this.peers[0];
+    // If no broker produced a host within this window, move on to the next
+    // wave of slots. (Each dial has its own, shorter hop timer as well.)
+    this.timers.push(window.setTimeout(() => {
+      if (!this.closed && !this.conn?.open) this.scheduleReconnect(300);
+    }, 12000));
   }
+
 
   /**
    * The room is one shared link but a short list of broker slots (the public
@@ -91,31 +111,43 @@ export class P2PSpeakerClient {
    * a host answers — the phone never has to be told which slot is live.
    */
 
-  private dial() {
+  private waveIndex = 0;
+
+  private dial(peer: Peer) {
     // Dial every slot AT ONCE. Scanning them one by one took seconds before a
     // phone found the host; in parallel the first channel that opens wins and
     // the rest are dropped.
-    const targets = this.roomId === FIXED_ROOM_ID ? ROOM_SLOTS : [this.roomId];
-    const tried = targets.map((t) => this.peer!.connect(t, { reliable: true }));
+    // A phone should not open a dozen channels at once, so the slots are
+    // dialled in small waves; the first one that answers wins and the rest
+    // are dropped.
+    const all = this.roomId === FIXED_ROOM_ID ? ROOM_SLOTS : [this.roomId];
+    const wave = this.waveIndex % Math.ceil(all.length / 4);
+    this.waveIndex++;
+    const targets = all.length > 4 ? all.slice(wave * 4, wave * 4 + 4) : all;
+    const tried = targets.map((t) => peer.connect(t, { reliable: true }));
     let won: DataConnection | null = null;
 
     const watchdog = window.setTimeout(() => {
-      if (won) return;
+      if (won || this.state.conn === 'connected') return;
       this.set({
         error: 'Could not reach the host. Both phones need internet, and the host tab must '
           + 'stay open. If one of you is on a restricted network, try the same Wi-Fi or '
           + 'mobile hotspot.',
       });
       tried.forEach((c) => { try { c.close(); } catch {} });
-      this.scheduleReconnect();
-    }, 12000);
+      this.scheduleReconnect(300);   // straight on to the next wave of slots
+    }, 5000);
     this.timers.push(watchdog);
 
     tried.forEach((conn) => {
       conn.on('open', () => {
-        if (won) { try { conn.close(); } catch {} return; }   // a slot already answered
+        if (won || this.state.conn === 'connected') { try { conn.close(); } catch {} return; }
         won = conn;
         this.conn = conn;
+        this.peer = peer;
+        // drop the brokers we no longer need
+        this.peers.forEach((p) => { if (p !== peer) { try { p.destroy(); } catch {} } });
+        this.peers = [peer];
         window.clearTimeout(watchdog);
         tried.forEach((o) => { if (o !== conn) { try { o.close(); } catch {} } });
         this.onConnected(conn);
@@ -126,7 +158,7 @@ export class P2PSpeakerClient {
         void this.handle(d as P2PMessage);
       });
       const lost = () => {
-        if (won !== conn) return;                              // a dead slot, not our host
+        if (won !== conn || this.conn !== conn) return;         // a dead slot, not our host
         this.set({ conn: 'reconnecting', hostOnline: false });
         this.scheduleReconnect();
       };
@@ -167,6 +199,30 @@ export class P2PSpeakerClient {
    * silent for the whole song. Now we notice the gap and ask for exactly the
    * missing pieces again.
    */
+  /** Play the host's live microphone alongside the music. */
+  private micAudio: HTMLAudioElement | null = null;
+  private playMic(stream: MediaStream) {
+    if (!this.micAudio) {
+      const a = new Audio();
+      (a as any).playsInline = true;
+      a.autoplay = true;
+      this.micAudio = a;
+    }
+    this.micAudio.srcObject = stream;
+    this.micAudio.volume = this.state.volume ?? 1;
+    void this.micAudio.play().catch(() => {
+      this.set({ info: 'Tap the screen once to let the host\u2019s microphone through.' });
+    });
+    this.set({ info: 'The host is speaking live.' });
+  }
+
+  private stopMic() {
+    if (!this.micAudio) return;
+    try { this.micAudio.pause(); } catch {}
+    this.micAudio.srcObject = null;
+    this.set({ info: null });
+  }
+
   private startChunkChase() {
     window.clearInterval(this.chaseTimer);
     this.chaseTimer = window.setInterval(() => {
@@ -185,6 +241,7 @@ export class P2PSpeakerClient {
 
   private scheduleReconnect(fixedWait?: number) {
     if (this.closed || this.reconnectPending) return;
+    if (this.conn?.open) return;              // already have a live channel
     this.reconnectPending = true;
     this.retry++;
     // While we are still scanning the slot list, keep the hops quick.
@@ -192,7 +249,7 @@ export class P2PSpeakerClient {
     this.timers.push(window.setTimeout(() => {
       this.reconnectPending = false;
       if (this.closed) return;
-      try { this.peer?.destroy(); } catch {}
+      try { this.peers.forEach((p) => p.destroy()); } catch {}
       this.connect();
     }, wait));
   }
@@ -264,6 +321,15 @@ export class P2PSpeakerClient {
         this.send({ type: 'TRACK_READY', trackId: this.trackId });
         // we may have been told to play while the file was still arriving
         if (this.transportPlaying) this.catchUp();
+        break;
+      }
+
+      case 'CLOCK_BIAS': {
+        // half of the host-measured error, clamped: converges in a couple of
+        // reports without ever ping-ponging.
+        const next = this.clockBias + m.deltaMs;
+        this.clockBias = Math.max(-1500, Math.min(1500, next));
+        this.realign();
         break;
       }
 
@@ -369,6 +435,7 @@ export class P2PSpeakerClient {
       this.audio.currentTime = 0;
       this.audio.muted = false;
       this.audioEnabled = true;
+      this.keepPlayingWhenLocked();
       this.set({ phase: 'AUDIO_READY', error: null, info: null });
       this.loadAudio();
       if (this.transportPlaying) this.catchUp();
@@ -412,6 +479,9 @@ export class P2PSpeakerClient {
    * No browser API reports it, so this is a manual nudge the listener can set
    * once per phone; it is remembered on that device.
    */
+  /** Host-measured correction of our clock estimate (see CLOCK_BIAS). */
+  private clockBias = 0;
+
   get outputOffsetMs() { return Number(localStorage.getItem('sm.outOffset') || 0); }
   setOutputOffsetMs(ms: number) {
     const v = Math.max(-500, Math.min(500, Math.round(ms)));
@@ -423,7 +493,7 @@ export class P2PSpeakerClient {
   private targetPosition() {
     return projectPosition(
       this.basePosition, this.baseHostTime,
-      this.clock.now() + this.outputOffsetMs, this.transportPlaying,
+      this.clock.now() + this.outputOffsetMs + this.clockBias, this.transportPlaying,
       this.state.duration || Infinity,
     );
   }
@@ -450,10 +520,14 @@ export class P2PSpeakerClient {
       if (lead <= 0) { this.catchUp(); return; }
       try { a.currentTime = position; } catch {}
       this.playTimer = window.setTimeout(() => {
+        // The host may have paused, stopped or seeked while we were waiting:
+        // a stale scheduled start used to make one phone play on its own.
+        if (!this.transportPlaying || this.baseHostTime !== startAt) return;
         const err = startAt - this.clock.now();
         try { a.currentTime = position - Math.min(0, err) / 1000; } catch {}
         void a.play()
           .then(() => {
+            if (!this.transportPlaying) { try { a.pause(); } catch {} return; }
             this.set({ phase: 'PLAYING', playing: true });
             // Slow decoders can begin hundreds of ms late, and a data channel's
             // clock keeps improving in the first seconds, so check twice.
@@ -487,6 +561,48 @@ export class P2PSpeakerClient {
     }
   }
 
+  /**
+   * Survive a locked screen.
+   *
+   * Android keeps a page's <audio> playing when the screen goes off, but only
+   * if the system sees it as real media playback — so we publish Media Session
+   * metadata and keep the session's play/pause handlers pointed at the host.
+   * We also hold a screen wake lock while the page is visible, which is what
+   * stops a phone from suspending Wi-Fi mid-song. The honest limit: the tab
+   * must stay open, and some battery savers will still stop it.
+   */
+  private keepPlayingWhenLocked() {
+    try {
+      const ms = (navigator as any).mediaSession;
+      if (ms) {
+        ms.setActionHandler?.('play', () => { /* the host owns transport */ });
+        ms.setActionHandler?.('pause', () => { /* ignore: the host owns transport */ });
+        ms.setActionHandler?.('stop', () => { /* ignore */ });
+        ms.metadata = new (window as any).MediaMetadata({
+          title: this.state.trackTitle || 'Sync Music',
+          artist: 'Synchronized speaker',
+          album: this.state.sessionName || 'Sync Music',
+        });
+        ms.playbackState = 'playing';
+      }
+    } catch { /* Media Session is optional */ }
+
+    const lock = async () => {
+      try {
+        if (document.visibilityState !== 'visible') return;
+        this.wakeLock = await (navigator as any).wakeLock?.request('screen');
+      } catch { /* denied or unsupported — playback still continues */ }
+    };
+    void lock();
+    document.addEventListener('visibilitychange', () => {
+      void lock();
+      // Coming back from a locked screen: re-check our place in the timeline.
+      if (document.visibilityState === 'visible' && this.transportPlaying) this.realign();
+    });
+  }
+
+  private wakeLock: any = null;
+
   private startReporting() {
     const report = () => {
       const a = this.audio;
@@ -497,6 +613,7 @@ export class P2PSpeakerClient {
         clockRtt: Math.round(this.clock.rtt), clockSynced: this.clock.synced,
         clockSamples: this.clock.sampleCount,
         seq: this.appliedSeq, haveTrack: this.haveTrack,
+        selfDriftMs: a && !a.paused ? Math.round((a.currentTime - this.targetPosition()) * 1000) : 0,
       });
       this.timers.push(window.setTimeout(report, 600));
     };

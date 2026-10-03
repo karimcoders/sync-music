@@ -40,6 +40,16 @@ export type P2PMessage =
   | { type: 'RESYNC'; seq: number; trackId: string; position: number; atHostTime: number; playing: boolean }
   | { type: 'VOLUME'; seq: number; volume: number }
   | { type: 'RENAME'; name: string }
+  /**
+   * Damped correction of a speaker's own clock estimate.
+   *
+   * Over the internet the two directions of a WebRTC channel are often not
+   * equally fast (especially through a TURN relay), and an NTP-style exchange
+   * then settles on a biased offset — the phone believes it is on time while
+   * the host measures it hundreds of ms away. The host owns the only
+   * trustworthy measurement, so it hands back half of the error at a time.
+   */
+  | { type: 'CLOCK_BIAS'; deltaMs: number }
   /** full snapshot used to repair a speaker that fell behind */
   | {
       type: 'STATE'; seq: number; trackId: string | null; title: string; playing: boolean;
@@ -53,6 +63,8 @@ export type P2PMessage =
       clockRtt: number; clockSynced: boolean; clockSamples: number;
       /** last transport seq we applied, and the track we actually hold */
       seq: number; haveTrack: string | null;
+      /** how far our own audio is from where WE think it should be (ms) */
+      selfDriftMs: number;
     };
 
 /** Peer ids are namespaced so a random PeerJS id can never collide with ours. */
@@ -76,7 +88,7 @@ export const FIXED_ROOM_ID = `${PEER_PREFIX}main`;
  * one and a speaker simply tries them in the same order until one answers.
  * The link the user shares never changes.
  */
-export const ROOM_SLOTS = [FIXED_ROOM_ID, ...Array.from({ length: 2 }, (_, i) => `${FIXED_ROOM_ID}-${i + 2}`)];
+export const ROOM_SLOTS = [FIXED_ROOM_ID, ...Array.from({ length: 11 }, (_, i) => `${FIXED_ROOM_ID}-${i + 2}`)];
 
 /** Human-typeable code (no 0/O/1/I), also used as the PeerJS room id. */
 export function newRoomCode(): string {
@@ -99,6 +111,26 @@ export const codeFromRoomId = (id: string) => id.replace(PEER_PREFIX, '');
  * published by metered.ca for exactly this purpose (no secret of ours is
  * exposed here).
  */
+/**
+ * Signalling brokers, tried in order.
+ *
+ * WebRTC needs a rendezvous server before two phones can find each other, and
+ * a single public one is a single point of failure: it rate-limits, it goes
+ * down, and it keeps ids reserved. Both sides walk the same list, so they meet
+ * on whichever one is healthy.
+ */
+export const BROKERS: Array<Record<string, unknown>> = [
+  {},                                                                   // 0.peerjs.com (PeerJS cloud)
+  // NB: PeerJS appends "peerjs" to `path`, so the path here is "/" even
+  // though the endpoint is /peerjs.
+  { host: 'peerjs-server.onrender.com', secure: true, port: 443, path: '/', key: 'peerjs' },
+];
+
+/** Full PeerJS options for broker `i` (ICE config is always the same). */
+export function peerOptions(i = 0) {
+  return { ...PEER_OPTIONS, ...BROKERS[i % BROKERS.length] };
+}
+
 export const PEER_OPTIONS = {
   debug: 0 as const,
   config: {

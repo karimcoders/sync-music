@@ -136,6 +136,22 @@ export default function Host({ go }: { go: (p: string) => void }) {
         </Row>
         {c instanceof P2PHostClient && (
           <Row style={{ marginTop: 12 }}>
+            <span className="dim">Live microphone</span>
+            <button
+              className={`chip ${s.micOn ? 'active' : ''}`} data-testid="mic"
+              onClick={() => void c.toggleMic()}
+            >{s.micOn ? 'On air' : 'Off'}</button>
+          </Row>
+        )}
+        {c instanceof P2PHostClient && s.micOn && (
+          <div className="tiny" style={{ marginTop: 6 }}>
+            Your voice goes straight to every speaker over WebRTC — roughly 100–250 ms behind,
+            so it is a PA, not a sample-accurate second channel. Keep the phones apart or you
+            will get feedback.
+          </div>
+        )}
+        {c instanceof P2PHostClient && (
+          <Row style={{ marginTop: 12 }}>
             <span className="dim">Play on this phone too</span>
             <button
               className={`chip ${c.localAudioOn ? 'active' : ''}`}

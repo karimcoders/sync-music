@@ -181,3 +181,36 @@ the single link now maps to a short ordered list of slots. The host takes the
 first free one; a speaker dials all of them **in parallel** and keeps the first
 that answers. The shared URL never changes. Also fixed: a losing duplicate
 channel used to knock the live speaker off the host's list.
+
+## Locked screens, the live microphone, and Sound Check
+
+**Screen off.** A speaker now publishes Media Session metadata the moment it is
+enabled, so Android treats the tab as real media playback instead of a
+background page, and it takes a screen wake lock while it is visible. Coming
+back from a locked screen it re-aligns with the timeline immediately. Honest
+limits: the tab must stay open, and an aggressive battery saver or "close tabs
+on sleep" setting can still stop it. The e2e suite now asserts that a hidden
+page keeps playing.
+
+**Live microphone.** The host can open its mic and talk to every speaker
+(`MIC` in the player). It is a normal WebRTC audio track — a PA channel, not
+part of the scheduled timeline — so expect roughly 100–250 ms over the
+internet, and expect feedback if a speaker phone is near the host. Late joiners
+are called in automatically; turning it off stops the stream everywhere.
+
+**Sound Check** (`/#/sound`) measures with the phone's own microphone:
+
+| Tool | What you get |
+| --- | --- |
+| Level | RMS and peak-hold in dBFS, with a clipping warning |
+| Spectrum | Ten octave bands, 31 Hz – 16 kHz, live |
+| A/B | Save a spectrum, change something, save another, see the difference per band |
+| Hum | 50 / 60 / 100 Hz energy, i.e. mains hum |
+| Dominant tone | The narrow ring that feedback sits on |
+| Test tones | 40–4000 Hz out of this phone, plus a 31 Hz → 16 kHz sweep |
+| Plain-language read | Boomy / dull / harsh / clipping / hum, in words |
+
+What it is **not**: a calibrated SPL meter. The numbers are relative to the mic
+input (dBFS), Android applies its own filtering, and the low end especially is
+approximate. It is reliable for comparisons — before vs after, spot A vs spot
+B, left vs right — which is what a sound check actually needs.

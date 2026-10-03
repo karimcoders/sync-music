@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import Home from './pages/Home';
 import Host from './pages/Host';
 import Speaker from './pages/Speaker';
+import SoundCheck from './pages/SoundCheck';
 
 /**
  * Minimal router. Works both when the Node server serves the app at "/" and
@@ -36,5 +37,6 @@ export default function App() {
 
   if (path === '/host') return <Host go={go} />;
   if (path === '/speaker') return <Speaker go={go} />;
+  if (path === '/sound') return <SoundCheck go={go} />;
   return <Home go={go} />;
 }
