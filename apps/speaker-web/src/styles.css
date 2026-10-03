@@ -266,3 +266,89 @@ input[type=range] { width: 100%; accent-color: #4ade9b; height: 26px; }
   border-radius: 16px;
   box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .35);
 }
+
+
+/* ---------------------------------------------------------------- player deck */
+.deck { position: relative; overflow: hidden; }
+.deck::before {
+  content: ''; position: absolute; inset: -40% -20% auto -20%; height: 70%;
+  background: radial-gradient(60% 100% at 50% 0%, rgba(99,102,241,.25), transparent 70%);
+  pointer-events: none;
+}
+.artwork {
+  position: relative; width: 100%; aspect-ratio: 1 / 1; max-height: 320px;
+  border-radius: 20px; overflow: hidden; display: grid; place-items: center;
+  box-shadow: 0 18px 50px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.18);
+}
+.art-glow {
+  position: absolute; inset: 0;
+  background: radial-gradient(70% 70% at 30% 20%, rgba(255,255,255,.35), transparent 60%);
+  mix-blend-mode: screen;
+}
+.art-disc {
+  position: relative; width: 44%; aspect-ratio: 1; border-radius: 50%;
+  background: conic-gradient(from 0deg, #15161b, #2a2c36, #15161b, #2a2c36, #15161b);
+  box-shadow: 0 10px 30px rgba(0,0,0,.5), inset 0 0 0 1px rgba(255,255,255,.08);
+  display: grid; place-items: center;
+}
+.art-disc span {
+  width: 26%; aspect-ratio: 1; border-radius: 50%;
+  background: rgba(255,255,255,.9); box-shadow: inset 0 0 0 4px rgba(0,0,0,.35);
+}
+.artwork.spinning .art-disc { animation: spin 6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.bars {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 34%;
+  display: flex; align-items: flex-end; gap: 3px; padding: 0 10px 10px;
+}
+.bars i {
+  flex: 1; height: 12%; border-radius: 3px 3px 0 0;
+  background: linear-gradient(to top, rgba(255,255,255,.85), rgba(255,255,255,.35));
+  transition: height .2s ease;
+}
+.bars.on i { animation-name: bar; animation-iteration-count: infinite; animation-direction: alternate; }
+@keyframes bar { from { height: 10%; } to { height: 85%; } }
+
+.deck-title { margin: 16px 0 12px; }
+.deck-title h2 { margin: 4px 0 2px; font-size: 22px; line-height: 1.25; }
+
+.scrub { position: relative; height: 26px; display: grid; align-items: center; }
+.scrub-track {
+  position: absolute; left: 0; right: 0; height: 6px; border-radius: 99px;
+  background: rgba(255,255,255,.12); overflow: hidden;
+}
+.scrub-track i {
+  display: block; height: 100%; border-radius: 99px;
+  background: linear-gradient(90deg, var(--accent, #6366f1), #22d3ee);
+}
+.scrub input[type=range] {
+  position: relative; width: 100%; margin: 0; background: transparent; appearance: none; height: 26px;
+}
+.scrub input[type=range]::-webkit-slider-thumb {
+  appearance: none; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; border: 0; box-shadow: 0 2px 10px rgba(0,0,0,.6); cursor: pointer;
+}
+.scrub input[type=range]::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 0; cursor: pointer;
+}
+.scrub input[type=range]::-webkit-slider-runnable-track { background: transparent; }
+
+.transport {
+  display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 16px;
+}
+.round {
+  display: grid; place-items: center; border-radius: 50%; cursor: pointer;
+  width: 46px; height: 46px; font-size: 15px; color: #e8e9ef;
+  background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.12);
+  transition: transform .12s ease, background .2s ease;
+}
+.round:hover:not(:disabled) { background: rgba(255,255,255,.14); transform: translateY(-1px); }
+.round:active:not(:disabled) { transform: scale(.94); }
+.round:disabled { opacity: .45; cursor: not-allowed; }
+.round.lg {
+  width: 72px; height: 72px; font-size: 22px; color: #0b0c10; border: 0;
+  background: linear-gradient(140deg, #fff, #c7d2fe);
+  box-shadow: 0 12px 30px rgba(99,102,241,.45);
+}
+@media (max-width: 380px) { .transport { gap: 10px; } .round { width: 42px; height: 42px; } .round.lg { width: 64px; height: 64px; } }

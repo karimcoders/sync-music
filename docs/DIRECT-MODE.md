@@ -101,3 +101,27 @@ node tools/p2p-e2e.mjs http://localhost:9090/ 3
 
 This opens one real host tab and three real speaker tabs, plays a real file and
 prints the measured spread.
+
+## The host tab can now be refreshed
+
+Until now a refresh of the host tab destroyed the room: the PeerJS id was
+random and the uploaded audio only existed in that page's memory.
+
+Now the host writes its room id to `localStorage` and the audio bytes to
+IndexedDB (`sync-music` → `tracks`). On reload the page re-opens the **same**
+PeerJS id and restores the playlist, so the speakers — which already retry with
+backoff — come back on their own. Two details make it work in practice:
+
+* The broker keeps the old registration alive for a few seconds, so
+  `unavailable-id` right after a reload is retried (4 times, 1.5 s apart)
+  instead of being reported as an error.
+* The host no longer pushes the audio to a speaker on connect. It waits for the
+  speaker's first `STATUS`, which reports `haveTrack`, and only sends the file
+  if it is actually missing. A speaker that survived the refresh keeps playing
+  from the blob it already has.
+* Speakers run a liveness watchdog: the host answers every `PING`, so more than
+  6 s of silence means the channel is dead even if PeerJS never fired `close`.
+
+Measured locally, 3 speakers, 30 s tone, host refreshed mid-song: all speakers
+reconnected, the playlist was restored, and playback resumed **14.8 ms** apart
+(17.6 ms once the clocks had settled).

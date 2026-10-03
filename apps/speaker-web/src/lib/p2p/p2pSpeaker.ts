@@ -36,6 +36,8 @@ export class P2PSpeakerClient {
   private alignedOffset = 0;
   private closed = false;
   private retry = 0;
+  private lastInbound = 0;
+  private reconnectPending = false;
 
   state: UiState = {
     conn: 'disconnected', phase: 'DISCONNECTED', sessionId: null, sessionName: '', speakerName: '',
@@ -68,7 +70,11 @@ export class P2PSpeakerClient {
     peer.on('open', () => this.dial());
     peer.on('error', (e: any) => {
       if (e?.type === 'peer-unavailable') {
-        this.set({ error: 'That host is not online. Ask them to open the host page again.', conn: 'disconnected', phase: 'DISCONNECTED' });
+        this.set({
+          conn: 'reconnecting', hostOnline: false,
+          info: 'Host is not online right now — retrying…',
+          error: this.retry > 4 ? 'That host is not online. Ask them to open the host page again.' : null,
+        });
       } else {
         this.set({ error: 'Could not reach the connection broker.' });
       }
@@ -107,19 +113,34 @@ export class P2PSpeakerClient {
         this.timers.push(window.setTimeout(() => this.ping(), i * 150));
       }
       this.timers.push(window.setInterval(() => this.ping(), 1000));
+      this.lastInbound = Date.now();
+      // PeerJS does not always fire 'close' when the host tab goes away (a
+      // refresh, a crash, a dead Wi-Fi link). The host answers every PING, so
+      // silence longer than a few seconds means the channel is gone: tear it
+      // down ourselves instead of sitting on a dead connection forever.
+      this.timers.push(window.setInterval(() => {
+        if (this.closed || this.reconnectPending) return;
+        if (Date.now() - this.lastInbound > 6000) {
+          this.set({ conn: 'reconnecting', hostOnline: false, info: 'Host went away — reconnecting…' });
+          try { this.conn?.close(); } catch {}
+          this.scheduleReconnect();
+        }
+      }, 2000));
       this.startReporting();
     });
 
-    conn.on('data', (d) => void this.handle(d as P2PMessage));
+    conn.on('data', (d) => { this.lastInbound = Date.now(); void this.handle(d as P2PMessage); });
     conn.on('close', () => { this.set({ conn: 'reconnecting', hostOnline: false }); this.scheduleReconnect(); });
     conn.on('error', () => { this.set({ conn: 'reconnecting', hostOnline: false }); this.scheduleReconnect(); });
   }
 
   private scheduleReconnect() {
-    if (this.closed) return;
+    if (this.closed || this.reconnectPending) return;
+    this.reconnectPending = true;
     this.retry++;
     const wait = Math.min(15000, 600 * 2 ** Math.min(this.retry, 5));
     this.timers.push(window.setTimeout(() => {
+      this.reconnectPending = false;
       if (this.closed) return;
       try { this.peer?.destroy(); } catch {}
       this.connect();
@@ -158,6 +179,11 @@ export class P2PSpeakerClient {
         break;
 
       case 'TRACK_META':
+        // already have these exact bytes — never swap the blob we are playing
+        if (this.haveTrack === m.trackId && this.objectUrl) {
+          this.send({ type: 'TRACK_READY', trackId: m.trackId });
+          break;
+        }
         this.incoming = {
           trackId: m.trackId, title: m.title, mime: m.mime, chunks: m.chunks,
           parts: new Array(m.chunks), got: 0,
@@ -305,7 +331,9 @@ export class P2PSpeakerClient {
   private loadAudio() {
     const a = this.audio;
     if (!a || !this.objectUrl || !this.trackId) return;
-    if (a.dataset.audioId === this.trackId) return;
+    // compare the actual source, not just the id: after a host refresh the id
+    // is the same but the blob behind it is new
+    if (a.dataset.audioId === this.trackId && a.src === this.objectUrl) return;
     a.src = this.objectUrl;
     a.dataset.audioId = this.trackId;
     a.load();

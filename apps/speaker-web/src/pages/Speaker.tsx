@@ -5,7 +5,7 @@ import { detectMode, roomParam, type Mode } from '../lib/mode';
 import { roomIdFromCode } from '../lib/p2p/messages';
 import QrScanner from '../components/QrScanner';
 import { backendOrigin, setBackend } from '../lib/backend';
-import { Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime } from '../ui';
+import { Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime, Icons } from '../ui';
 
 type Discovered = { sessionId: string; name: string; speakerCount: number; hostOnline: boolean };
 
@@ -186,7 +186,7 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
 
       {!enabled && (
         <button className="tap-overlay" data-testid="enable-speaker" onClick={() => c?.enableSpeaker()}>
-          <span className="tap-ring">🔈</span>
+          <span className="tap-ring">{Icons.speaker}</span>
           <span className="tap-title">Tap anywhere to start</span>
           <span className="tap-sub">
             {s.playing

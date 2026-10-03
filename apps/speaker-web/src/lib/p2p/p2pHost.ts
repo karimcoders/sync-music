@@ -3,6 +3,7 @@ import { AudioTrack, SpeakerInfo, SYNC, TransportState } from '@sync-music/proto
 import { projectPosition } from '@sync-music/sync-engine';
 import type { HostState } from '../hostClient';
 import { P2PMessage, PEER_OPTIONS, codeFromRoomId, newRoomCode, roomIdFromCode } from './messages';
+import { allTracks, clearTracks, deleteTrack, putTrack } from './trackStore';
 
 /**
  * Direct-mode host: this browser tab IS the server.
@@ -24,6 +25,7 @@ interface Conn {
   sent: Set<string>;
   /** last time we pushed a repair snapshot to this speaker */
   lastRepair: number;
+  sending?: boolean;
 }
 
 const STORE = 'sync-music.p2phost';
@@ -34,7 +36,12 @@ export class P2PHostClient {
   private files = new Map<string, { track: AudioTrack; bytes: ArrayBuffer; mime: string }>();
   private timers: number[] = [];
   private seq = 0;           // ids for uploaded tracks
-  private cmdSeq = 0;        // monotonic transport command counter
+  /**
+   * Monotonic transport counter. Seeded from the clock so that it keeps
+   * increasing even after the host tab is refreshed — speakers that survived
+   * the refresh must not mistake a new command for an old one.
+   */
+  private cmdSeq = Date.now();
   private roomId = '';
 
   state: HostState = {
@@ -72,7 +79,17 @@ export class P2PHostClient {
   /** Short code for anyone who would rather type than open a link. */
   get joinCode() { return codeFromRoomId(this.roomId).toUpperCase(); }
 
-  get saved() { return null; } // a direct-mode room cannot outlive the tab
+  /**
+   * A direct-mode room now survives a refresh: the room id lives in
+   * localStorage and the audio in IndexedDB, so the tab can re-open the SAME
+   * PeerJS id and the speakers reconnect by themselves.
+   */
+  get saved(): { sessionId: string; token: string } | null {
+    try {
+      const v = JSON.parse(localStorage.getItem(STORE) || 'null');
+      return v?.roomId ? { sessionId: v.roomId, token: v.name ?? '' } : null;
+    } catch { return null; }
+  }
 
   /* ------------------------------ lifecycle ----------------------------- */
 
@@ -88,18 +105,62 @@ export class P2PHostClient {
       });
       this.pushTransport();
       localStorage.setItem(STORE, JSON.stringify({ roomId: this.roomId, name }));
+      void clearTracks(); // a brand-new room starts with an empty library
     } catch (e: any) {
       this.set({ error: e?.message || 'Could not open a direct room. Check your internet connection.' });
     } finally { this.set({ busy: false }); }
   }
 
-  private openPeer(id: string) {
+  /**
+   * Re-open a room after a page refresh: same id, playlist restored from
+   * IndexedDB. Speakers are already retrying, so they come back on their own.
+   */
+  async attach(roomId: string, name = '') {
+    this.roomId = roomId;
+    this.set({ busy: true, conn: 'connecting', sessionName: name, info: 'Re-opening your room…' });
+    try {
+      await this.openPeer(roomId, 4);
+      const stored = await allTracks();
+      if (stored.length) {
+        const playlist: AudioTrack[] = stored.map((t) => {
+          this.files.set(t.id, { track: null as any, bytes: t.bytes, mime: t.mimeType });
+          const track: AudioTrack = {
+            id: t.id, title: t.title, artist: t.artist, filename: t.filename, mimeType: t.mimeType,
+            size: t.size, duration: t.duration, createdAt: Date.now(),
+            url: URL.createObjectURL(new Blob([t.bytes], { type: t.mimeType })),
+          };
+          this.files.set(t.id, { track, bytes: t.bytes, mime: t.mimeType });
+          return track;
+        });
+        this.transport = { ...this.transport, playlist, trackIndex: 0, trackId: playlist[0].id };
+      }
+      this.set({
+        sessionId: roomId, conn: 'connected',
+        info: 'Room re-opened — speakers reconnect by themselves.',
+      });
+      this.pushTransport();
+    } catch (e: any) {
+      localStorage.removeItem(STORE);
+      this.set({ sessionId: null, conn: 'offline', error: e?.message || 'Could not re-open that room.' });
+    } finally { this.set({ busy: false }); }
+  }
+
+  private openPeer(id: string, retries = 0) {
     return new Promise<void>((resolve, reject) => {
       const peer = new Peer(id, PEER_OPTIONS);
       this.peer = peer;
-      const fail = (e: any) => reject(new Error(e?.type === 'unavailable-id'
-        ? 'That room id is taken, try again.'
-        : 'Could not reach the connection broker.'));
+      const fail = (e: any) => {
+        // Right after a refresh the broker may still hold the old registration
+        // for a few seconds — wait it out instead of losing the room.
+        if (e?.type === 'unavailable-id' && retries > 0) {
+          try { peer.destroy(); } catch {}
+          window.setTimeout(() => this.openPeer(id, retries - 1).then(resolve, reject), 1500);
+          return;
+        }
+        reject(new Error(e?.type === 'unavailable-id'
+          ? 'That room id is taken, try again.'
+          : 'Could not reach the connection broker.'));
+      };
       peer.once('open', () => { peer.off('error', fail); resolve(); });
       peer.once('error', fail);
       peer.on('connection', (c) => this.accept(c));
@@ -130,8 +191,11 @@ export class P2PHostClient {
         type: 'WELCOME', speakerId: conn.peer, name: info.name,
         sessionName: this.state.sessionName, hostTime: Date.now(),
       });
-      // give the newcomer the current track and the running timeline
-      void this.pushTrackTo(conn.peer).then(() => this.resyncOne(conn.peer));
+      // Do NOT push the audio yet: a speaker that survived a host refresh
+      // already has it, and re-sending would be a pointless megabyte (and
+      // would replace the very blob it is playing from). Its first STATUS
+      // tells us whether it needs the file.
+      this.resyncOne(conn.peer);
       this.publishSpeakers();
     });
 
@@ -175,6 +239,19 @@ export class P2PHostClient {
           lastSeen: Date.now(),
         };
         this.publishSpeakers();
+
+        // --- repair: a speaker may have missed a command or the audio itself
+        const want = track?.id ?? null;
+        if (want && m.haveTrack !== want && !c.sending) {
+          c.sending = true;
+          void this.pushTrackTo(peerId).finally(() => {
+            c.sending = false;
+            this.sendState(peerId);
+          });
+        } else if (m.seq < this.cmdSeq && Date.now() - (c.lastRepair ?? 0) > 1500) {
+          c.lastRepair = Date.now();
+          this.sendState(peerId);
+        }
         break;
       }
       case 'PONG': {
@@ -240,6 +317,10 @@ export class P2PHostClient {
         duration, url: URL.createObjectURL(file), createdAt: Date.now(),
       };
       this.files.set(id, { track, bytes, mime: track.mimeType });
+      void putTrack({
+        id, title: track.title, artist: track.artist, filename: track.filename,
+        mimeType: track.mimeType, size: track.size, duration, bytes,
+      });
       this.transport = { ...this.transport, playlist: [...this.transport.playlist, track] };
       if (this.transport.trackIndex < 0) this.transport = { ...this.transport, trackIndex: 0, trackId: id };
       this.pushTransport();
@@ -310,7 +391,11 @@ export class P2PHostClient {
     ids.splice(j, 0, ids.splice(index, 1)[0]);
     this.setPlaylist(ids);
   }
-  remove(id: string) { this.setPlaylist(this.transport.playlist.map((t) => t.id).filter((x) => x !== id)); }
+  remove(id: string) {
+    void deleteTrack(id);
+    this.files.delete(id);
+    this.setPlaylist(this.transport.playlist.map((t) => t.id).filter((x) => x !== id));
+  }
 
   /* ------------------------------- transport ---------------------------- */
 
@@ -439,14 +524,13 @@ export class P2PHostClient {
     }
   }
 
-  attach() { /* nothing to re-attach to in direct mode */ }
-
   async end() {
     this.broadcast({ type: 'STOP', seq: ++this.cmdSeq });
     this.conns.forEach((c) => { try { c.conn.close(); } catch {} });
     this.conns.clear();
     try { this.peer?.destroy(); } catch {}
     localStorage.removeItem(STORE);
+    void clearTracks();
     this.transport = { ...this.transport, state: 'idle', playlist: [], trackIndex: -1, trackId: null };
     this.set({ sessionId: null, transport: null, speakers: [], speakerCount: 0, conn: 'offline' });
   }

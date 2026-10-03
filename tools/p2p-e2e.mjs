@@ -114,6 +114,34 @@ const paused2 = await Promise.all(speakers.map(probe));
 paused2.forEach((s, i) => { if (!s.paused) fail(`speaker ${i + 1} ignored the second PAUSE`); });
 if (paused2.every((s) => s.paused)) log('✓ second PAUSE reached every speaker, including the first one');
 
+/* ---- the host tab must survive a refresh (room id + library persist) ---- */
+await host.reload({ waitUntil: 'networkidle' });
+await host.waitForTimeout(6000);
+const stillLive = await host.getByTestId('speaker-count').count();
+if (!stillLive) fail('the room disappeared after the host refreshed');
+else {
+  const back = (await host.getByTestId('speaker-count').innerText()).trim();
+  log(`✓ host refreshed: room still open, speakers back: ${back}`);
+  if (Number(back) === 0) fail('no speaker reconnected after the host refreshed');
+  const pl = await host.locator('[data-testid=playlist] .list-item').count();
+  log(`✓ playlist restored after refresh: ${pl} track(s)`);
+  if (!pl) fail('the playlist was lost on refresh');
+  await host.getByTestId('play').click();
+  await host.waitForTimeout(6000);
+  const after = await Promise.all(speakers.map(probe));
+  after.forEach((s, i) => log(`  speaker ${i + 1} after host refresh: currentTime=${s?.t?.toFixed(3)} paused=${s?.paused}`));
+  if (after.some((s) => !s || s.paused)) fail('speakers did not play after the host refreshed');
+  else {
+    const sp = (Math.max(...after.map((s) => s.t)) - Math.min(...after.map((s) => s.t))) * 1000;
+    log(`  spread right after the host refresh: ${sp.toFixed(1)} ms (clocks are re-syncing)`);
+    await host.waitForTimeout(8000);
+    const settled = await Promise.all(speakers.map(probe));
+    const sp2 = (Math.max(...settled.map((s) => s.t)) - Math.min(...settled.map((s) => s.t))) * 1000;
+    log(`✓ spread once settled after the host refresh: ${sp2.toFixed(1)} ms`);
+    if (sp2 > 150) fail(`post-refresh spread too large: ${sp2.toFixed(0)} ms`);
+  }
+}
+
 await browser.close();
 console.log(bad ? '\nSOME CHECKS FAILED' : '\nALL CHECKS PASSED');
 process.exit(bad ? 1 : 0);

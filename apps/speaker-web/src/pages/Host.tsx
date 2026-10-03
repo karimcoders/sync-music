@@ -4,7 +4,7 @@ import { P2PHostClient } from '../lib/p2p/p2pHost';
 import { detectMode, type Mode } from '../lib/mode';
 import { backendOrigin } from '../lib/backend';
 import JoinCard from '../components/JoinCard';
-import { Button, Card, Equalizer, Field, Logo, Meter, Row, Shell, Stack, Status, fmtTime } from '../ui';
+import { Artwork, Button, Card, Icons, Equalizer, Field, Logo, Meter, Row, RoundBtn, Scrubber, Shell, Stack, Status, fmtTime } from '../ui';
 
 type AnyHost = HostClient | P2PHostClient;
 
@@ -29,7 +29,7 @@ export default function Host({ go }: { go: (p: string) => void }) {
       ref.current = c;
       setS({ ...c.state });
       const saved = c.saved;
-      if (saved) (c as HostClient).attach(saved.sessionId, saved.token); // survives a refresh
+      if (saved) c.attach(saved.sessionId, saved.token); // survives a refresh
     });
     return () => { disposed = true; created?.dispose(); };
   }, []);
@@ -117,35 +117,32 @@ export default function Host({ go }: { go: (p: string) => void }) {
 
       <JoinCard link={link} code={joinCode} />
 
-      <Card>
-        <div className="kicker">Now playing</div>
-        <h2 style={{ marginTop: 6 }}>{track ? track.title : 'No song selected'}</h2>
-        <div className="dim">{track ? track.artist : 'Add a song below to get started'}</div>
-        <div style={{ height: 14 }} />
-        <Meter value={pct} />
-        <input
-          type="range" min={0} max={1000} value={dur ? Math.round((pos / dur) * 1000) : 0}
-          onChange={(e) => setSeekPreview((+e.target.value / 1000) * dur)}
-          onMouseUp={() => { if (seekPreview != null) c?.seek(seekPreview); setSeekPreview(null); }}
-          onTouchEnd={() => { if (seekPreview != null) c?.seek(seekPreview); setSeekPreview(null); }}
-          disabled={!track}
+      <Card className="deck">
+        <Artwork title={track?.title ?? 'Sync Music'} playing={!!c?.playing} />
+        <div className="deck-title">
+          <div className="kicker">{c?.playing ? 'Now playing' : 'Paused'}</div>
+          <h2 data-testid="now-title">{track ? track.title : 'No song selected'}</h2>
+          <div className="dim">{track ? track.artist : 'Add a song below to get started'}</div>
+        </div>
+        <Scrubber
+          value={pos} max={dur} disabled={!track}
+          onPreview={setSeekPreview}
+          onCommit={() => { if (seekPreview != null) c?.seek(seekPreview); setSeekPreview(null); }}
         />
         <Row>
           <span className="dim mono">{fmtTime(pos)}</span>
-          <span className="dim mono">{fmtTime(dur)}</span>
+          <span className="dim mono">-{fmtTime(Math.max(0, dur - pos))}</span>
         </Row>
-        <div style={{ height: 12 }} />
-        <div className="btn-grid three">
-          <Button variant="ghost" onClick={() => c?.prev()}>‹ Prev</Button>
-          <Button testId="play" onClick={() => c?.toggle()} disabled={(s.transport?.playlist.length ?? 0) === 0}>
-            {c?.playing ? '❚❚  PAUSE' : '▶  PLAY'}
-          </Button>
-          <Button variant="ghost" onClick={() => c?.next()}>Next ›</Button>
-        </div>
-        <div style={{ height: 10 }} />
-        <div className="btn-grid">
-          <Button variant="ghost" onClick={() => c?.stop()}>Stop</Button>
-          <Button variant="ghost" onClick={() => c?.resync()}>Resync all</Button>
+        <div className="transport">
+          <RoundBtn label="Stop" onClick={() => c?.stop()}>{Icons.stop}</RoundBtn>
+          <RoundBtn label="Previous track" onClick={() => c?.prev()}>{Icons.prev}</RoundBtn>
+          <RoundBtn
+            label={c?.playing ? 'Pause' : 'Play'} size="lg" testId="play"
+            disabled={(s.transport?.playlist.length ?? 0) === 0}
+            onClick={() => c?.toggle()}
+          >{c?.playing ? Icons.pause : Icons.play}</RoundBtn>
+          <RoundBtn label="Next track" onClick={() => c?.next()}>{Icons.next}</RoundBtn>
+          <RoundBtn label="Resync every speaker" onClick={() => c?.resync()}>{Icons.resync}</RoundBtn>
         </div>
         <div style={{ height: 14 }} />
         <div className="kicker">Master volume</div>
