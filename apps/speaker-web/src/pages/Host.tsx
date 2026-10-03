@@ -1,27 +1,42 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { HostClient, type HostState } from '../lib/hostClient';
+import { P2PHostClient } from '../lib/p2p/p2pHost';
+import { detectMode, type Mode } from '../lib/mode';
 import { backendOrigin } from '../lib/backend';
 import { Button, Card, Equalizer, Field, Logo, Meter, Row, Shell, Stack, Status, fmtTime } from '../ui';
 
-const speakerLink = () => `${location.origin}${import.meta.env.BASE_URL}speaker`;
+type AnyHost = HostClient | P2PHostClient;
 
 export default function Host({ go }: { go: (p: string) => void }) {
   const [s, setS] = useState<HostState | null>(null);
-  const ref = useRef<HostClient | null>(null);
+  const [mode, setMode] = useState<Mode | null>(null);
+  const ref = useRef<AnyHost | null>(null);
   const [name, setName] = useState('My Music');
   const [seekPreview, setSeekPreview] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    const c = new HostClient((st) => setS({ ...st }));
-    ref.current = c;
-    setS({ ...c.state });
-    const saved = c.saved;
-    if (saved) c.attach(saved.sessionId, saved.token); // survives a refresh
-    return () => c.dispose();
+    let disposed = false;
+    let created: AnyHost | null = null;
+    void detectMode().then((m) => {
+      if (disposed) return;
+      setMode(m);
+      const c: AnyHost = m === 'direct'
+        ? new P2PHostClient((st) => setS({ ...st }))
+        : new HostClient((st) => setS({ ...st }));
+      created = c;
+      ref.current = c;
+      setS({ ...c.state });
+      const saved = c.saved;
+      if (saved) (c as HostClient).attach(saved.sessionId, saved.token); // survives a refresh
+    });
+    return () => { disposed = true; created?.dispose(); };
   }, []);
 
   const c = ref.current;
+  const link = c instanceof P2PHostClient
+    ? c.speakerUrl
+    : `${location.origin}${import.meta.env.BASE_URL}speaker`;
   const track = c?.track ?? null;
   const dur = track?.duration ?? 0;
   const pos = seekPreview ?? s?.position ?? 0;
@@ -54,7 +69,15 @@ export default function Host({ go }: { go: (p: string) => void }) {
           </Stack>
         </Card>
         <Card>
-          <div className="kicker">Heads up</div>
+          <div className="kicker">{mode === 'direct' ? 'Direct mode — no server' : 'Heads up'}</div>
+          {mode === 'direct' && (
+            <p className="tiny">
+              No backend was found, so this tab will be the server: phones connect straight to it
+              over WebRTC and the track is sent to each of them from here. Keep this tab open and
+              the screen awake — if it closes, playback stops. A real backend (see the README)
+              is steadier for many phones and large files.
+            </p>
+          )}
           <p className="tiny" style={{ marginBottom: 0 }}>
             This browser console speaks the same protocol as the Android host app
             (<code>apps/host-android</code>) — same REST, same WebSocket, same server-timestamp
@@ -88,10 +111,10 @@ export default function Host({ go }: { go: (p: string) => void }) {
         <div style={{ height: 14 }} />
         <div className="kicker">Speaker link — share it any way you like</div>
         <Row style={{ marginTop: 6 }}>
-          <a href={speakerLink()} target="_blank" rel="noreferrer">{speakerLink()}</a>
+          <a href={link} target="_blank" rel="noreferrer">{link}</a>
           <button
             className="icon-btn"
-            onClick={() => { navigator.clipboard?.writeText(speakerLink()); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+            onClick={() => { navigator.clipboard?.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
           >{copied ? 'Copied' : 'Copy'}</button>
         </Row>
         {backendOrigin && <div className="tiny" style={{ marginTop: 6 }}>Server: {backendOrigin}</div>}

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { SpeakerClient, type UiState } from '../lib/client';
+import { P2PSpeakerClient } from '../lib/p2p/p2pSpeaker';
+import { roomParam } from '../lib/mode';
 import { backendOrigin, setBackend } from '../lib/backend';
 import { Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime } from '../ui';
 
@@ -10,11 +12,17 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
   const [sessions, setSessions] = useState<Discovered[]>([]);
   const [searching, setSearching] = useState(true);
   const [failed, setFailed] = useState(false);
-  const ref = useRef<SpeakerClient | null>(null);
+  const ref = useRef<SpeakerClient | P2PSpeakerClient | null>(null);
+  const room = roomParam();
 
   useEffect(() => {
-    const c = new SpeakerClient((st) => setS({ ...st }));
+    // A link that carries ?h=<room> means the host has no backend and is
+    // serving the session straight from its own browser (direct mode).
+    const c: SpeakerClient | P2PSpeakerClient = room
+      ? new P2PSpeakerClient(room, (st) => setS({ ...st }))
+      : new SpeakerClient((st) => setS({ ...st }));
     ref.current = c;
+    (window as any).__syncClient = c; // diagnostics / e2e only
     setS({ ...c.state });
     let stopped = false;
     const look = async () => {
@@ -48,7 +56,8 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
           <Stack gap={14} style={{ alignItems: 'center', textAlign: 'center' }}>
             <div className="hero-emoji">{failed ? '📡' : searching ? '🔎' : sessions.length ? '🎧' : '🎧'}</div>
             <h1>
-              {failed ? 'Can’t reach the server'
+              {room ? 'Connecting to the host…'
+                : failed ? 'Can’t reach the server'
                 : searching ? 'Looking for a host…'
                 : sessions.length ? 'Host found' : 'No host yet'}
             </h1>
@@ -68,13 +77,13 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
                   <Status tone={x.hostOnline ? 'ok' : 'warn'}>{x.hostOnline ? 'live' : 'idle'}</Status>
                 </Row>
                 <div style={{ height: 12 }} />
-                <Button testId="connect-host" onClick={() => c?.connect(x.sessionId)}>CONNECT</Button>
+                <Button testId="connect-host" onClick={() => (c as SpeakerClient)?.connect(x.sessionId)}>CONNECT</Button>
               </Card>
             ))}
             {s.error && <div className="err-text">{s.error}</div>}
           </Stack>
         </Card>
-        <BackendSetting promote={failed} />
+        {!room && <BackendSetting promote={failed} />}
         <button className="chip" style={{ alignSelf: 'center' }} onClick={() => go('/')}>← Home</button>
       </Shell>
     );

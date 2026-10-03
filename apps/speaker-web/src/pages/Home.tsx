@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
 import { apiUrl, backendOrigin } from '../lib/backend';
+import { detectMode, type Mode } from '../lib/mode';
 import { Button, Card, Logo, Row, Shell, Stack, Status } from '../ui';
 
 export default function Home({ go }: { go: (p: string) => void }) {
   const [health, setHealth] = useState<'checking' | 'up' | 'down'>('checking');
   const [sessions, setSessions] = useState(0);
+  const [mode, setMode] = useState<Mode | null>(null);
+  useEffect(() => { void detectMode().then(setMode); }, []);
 
   useEffect(() => {
     let alive = true;
@@ -35,11 +38,22 @@ export default function Home({ go }: { go: (p: string) => void }) {
             and stay together.
           </p>
           <Row>
-            <Status tone={health === 'up' ? 'ok' : health === 'down' ? 'err' : 'warn'}>
-              {health === 'up' ? 'Server online' : health === 'down' ? 'Server unreachable' : 'Checking…'}
+            <Status tone={mode === 'direct' ? 'ok' : health === 'up' ? 'ok' : health === 'down' ? 'err' : 'warn'}>
+              {mode === 'direct' ? 'Direct mode — no server needed'
+                : health === 'up' ? 'Server online'
+                : health === 'down' ? 'Server unreachable' : 'Checking…'}
             </Status>
-            <span className="dim mono">{sessions} active session{sessions === 1 ? '' : 's'}</span>
+            {mode !== 'direct' && (
+              <span className="dim mono">{sessions} active session{sessions === 1 ? '' : 's'}</span>
+            )}
           </Row>
+          {mode === 'direct' && (
+            <p className="tiny" style={{ margin: 0 }}>
+              No backend is configured, so the host's browser runs the session itself and the
+              phones connect to it directly (WebRTC). Nothing to install or deploy — just keep
+              the host tab open.
+            </p>
+          )}
         </Stack>
       </Card>
 

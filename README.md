@@ -16,6 +16,11 @@ together within a few tens of milliseconds on a healthy network.
 > There is no product-level speaker limit anywhere in this codebase — the only cap is
 > `MAX_CONNECTIONS_PER_INSTANCE`, an infrastructure guard you configure per deployment.
 
+## Two ways to run it
+
+* **Server mode (recommended)** — the Node backend in `server/` owns the clock and serves the audio. Deploy it anywhere (one click with the Render button above) and point the web app at it.
+* **Direct mode (no server at all)** — if no backend is reachable, the host's browser tab becomes the authority and the phones connect to it over WebRTC. The static site alone is then enough, so the GitHub Pages link works on its own. The trade-offs are written down honestly in [`docs/DIRECT-MODE.md`](docs/DIRECT-MODE.md): the host tab must stay open, and it uploads the track to every phone.
+
 ## What this honestly is (and is not)
 
 | Claim | Reality |

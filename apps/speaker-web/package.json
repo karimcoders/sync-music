@@ -11,6 +11,7 @@
   "dependencies": {
     "@sync-music/protocol": "1.0.0",
     "@sync-music/sync-engine": "1.0.0",
+    "peerjs": "^1.5.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
