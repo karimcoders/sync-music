@@ -30,6 +30,8 @@ export class P2PSpeakerClient {
   private appliedSeq = 0;
   /** in-flight chunked download */
   private incoming: { trackId: string; title: string; mime: string; chunks: number; parts: (ArrayBuffer | undefined)[]; got: number } | null = null;
+  private lastChunkAt = 0;
+  private chaseTimer = 0;
   private timers: number[] = [];
   private playTimer: number | null = null;
   /** last clock offset we aligned playback against */
@@ -134,6 +136,27 @@ export class P2PSpeakerClient {
     conn.on('error', () => { this.set({ conn: 'reconnecting', hostOnline: false }); this.scheduleReconnect(); });
   }
 
+  /**
+   * A dropped chunk used to mean the file never completed and that phone stayed
+   * silent for the whole song. Now we notice the gap and ask for exactly the
+   * missing pieces again.
+   */
+  private startChunkChase() {
+    window.clearInterval(this.chaseTimer);
+    this.chaseTimer = window.setInterval(() => {
+      const inc = this.incoming;
+      if (!inc) { window.clearInterval(this.chaseTimer); return; }
+      if (Date.now() - this.lastChunkAt < 2500) return;
+      const missing: number[] = [];
+      for (let i = 0; i < inc.chunks && missing.length < 400; i++) if (!inc.parts[i]) missing.push(i);
+      if (!missing.length) return;
+      this.lastChunkAt = Date.now();
+      this.set({ info: `Re-requesting ${missing.length} missing piece(s) of the track…` });
+      this.send({ type: 'TRACK_NEED', trackId: inc.trackId, indexes: missing });
+    }, 1200);
+    this.timers.push(this.chaseTimer);
+  }
+
   private scheduleReconnect() {
     if (this.closed || this.reconnectPending) return;
     this.reconnectPending = true;
@@ -188,7 +211,9 @@ export class P2PSpeakerClient {
           trackId: m.trackId, title: m.title, mime: m.mime, chunks: m.chunks,
           parts: new Array(m.chunks), got: 0,
         };
-        this.set({ trackTitle: m.title, info: m.chunks > 8 ? 'Receiving the track…' : null });
+        this.set({ trackTitle: m.title, info: m.chunks > 8 ? 'Receiving the track…' : null, bufferedPct: 0 });
+        this.lastChunkAt = Date.now();
+        this.startChunkChase();
         break;
 
       case 'TRACK_CHUNK': {
@@ -196,6 +221,7 @@ export class P2PSpeakerClient {
         if (!inc || inc.trackId !== m.trackId || inc.parts[m.index]) break;
         inc.parts[m.index] = m.bytes;
         inc.got++;
+        this.lastChunkAt = Date.now();
         this.set({ bufferedPct: Math.round((inc.got / inc.chunks) * 100) });
         if (inc.got < inc.chunks) break;
 
@@ -205,7 +231,8 @@ export class P2PSpeakerClient {
         this.trackId = inc.trackId;
         this.haveTrack = inc.trackId;
         this.incoming = null;
-        this.set({ trackTitle: inc.title, trackArtist: '', info: null });
+        window.clearInterval(this.chaseTimer);
+        this.set({ trackTitle: inc.title, trackArtist: '', info: null, bufferedPct: 100 });
         if (this.audioEnabled) this.loadAudio();
         this.send({ type: 'TRACK_READY', trackId: this.trackId });
         // we may have been told to play while the file was still arriving

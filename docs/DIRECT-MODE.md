@@ -125,3 +125,30 @@ backoff — come back on their own. Two details make it work in practice:
 Measured locally, 3 speakers, 30 s tone, host refreshed mid-song: all speakers
 reconnected, the playlist was restored, and playback resumed **14.8 ms** apart
 (17.6 ms once the clocks had settled).
+
+## One permanent link, and the host plays too
+
+Three changes asked for after testing on real phones:
+
+1. **A single URL for everybody.** The room id is now the constant
+   `syncmusic-main`, so the host always opens the same room and the speaker
+   link is simply `…/#/speaker` — no code, no per-session URL. Share it once,
+   or print the QR once, and it keeps working. Honest trade-off: the link is
+   public (anyone who has it can join) and only one host tab can hold the room
+   at a time; a second host sees *"Someone else already has the room open."*
+2. **The host phone is a speaker too.** Its own audio element follows the exact
+   same scheduled host-clock timeline as the others, with an **on/off toggle**
+   in the player. The browser only allows it after a tap — the toggle and the
+   PLAY button provide that.
+3. **Why it stuttered, and what changed.**
+   * Transfers are now **serialised**: the host has one uplink, so sending the
+     file to three phones at once made all three slow *and* delayed the
+     PLAY/PAUSE messages behind the saturated channel.
+   * Chunks are 32 kB and the channel is kept under 128 kB of queued data, so
+     control messages never sit behind megabytes of audio.
+   * A phone that loses chunks used to stay silent for the whole song. It now
+     spots the gap after 2.5 s and sends `TRACK_NEED` with exactly the missing
+     indexes; the host re-sends only those.
+
+Measured locally, 3 speakers: 22.9 ms spread including a late joiner, 2.9 ms
+after a host refresh, and the host's own output within 50 ms of the speakers.

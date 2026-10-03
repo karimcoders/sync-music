@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { SpeakerClient, type UiState } from '../lib/client';
 import { P2PSpeakerClient } from '../lib/p2p/p2pSpeaker';
 import { detectMode, roomParam, type Mode } from '../lib/mode';
-import { roomIdFromCode } from '../lib/p2p/messages';
+import { FIXED_ROOM_ID, roomIdFromCode } from '../lib/p2p/messages';
 import QrScanner from '../components/QrScanner';
 import { backendOrigin, setBackend } from '../lib/backend';
 import { Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime, Icons } from '../ui';
@@ -15,16 +15,20 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
   const [searching, setSearching] = useState(true);
   const [failed, setFailed] = useState(false);
   const ref = useRef<SpeakerClient | P2PSpeakerClient | null>(null);
-  const room = roomParam();
+  const linkRoom = roomParam();
   const wanted = urlParam('s');          // session id straight from the host's link
   const [code, setCode] = useState('');  // typed join code
   const [scanning, setScanning] = useState(false);
-  const [mode, setMode] = useState<Mode | null>(room ? 'direct' : null);
+  const [mode, setMode] = useState<Mode | null>(linkRoom ? 'direct' : null);
+  // There is only ONE room. Without a backend this page joins it straight
+  // away, so the same link (or QR) works for everybody, every time — nothing
+  // to type, no new URL per session.
+  const room = linkRoom ?? (mode === 'direct' ? FIXED_ROOM_ID : null);
 
   // Without a backend there is nothing to "discover": the phone has to be
   // pointed at a host, by QR, link or code. Decide that before connecting,
   // otherwise a static deployment wrongly reports "can't reach the server".
-  useEffect(() => { if (!room) void detectMode().then(setMode); }, [room]);
+  useEffect(() => { if (!linkRoom) void detectMode().then(setMode); }, [linkRoom]);
 
   useEffect(() => {
     if (!room && mode !== 'server') return;   // direct mode: wait for a QR/code

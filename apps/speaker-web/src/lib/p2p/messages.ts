@@ -27,6 +27,8 @@ export type P2PMessage =
   | { type: 'TRACK_META'; trackId: string; title: string; mime: string; size: number; chunks: number }
   | { type: 'TRACK_CHUNK'; trackId: string; index: number; bytes: ArrayBuffer }
   | { type: 'TRACK_READY'; trackId: string }
+  /** a speaker noticed holes in the transfer and asks for those chunks again */
+  | { type: 'TRACK_NEED'; trackId: string; indexes: number[] }
   // transport (all timestamps are HOST-clock epoch ms) --------------------
   // Every transport change carries a monotonic `seq`. Speakers report the last
   // one they applied, so the host can tell who missed a command and re-send
@@ -55,6 +57,17 @@ export type P2PMessage =
 
 /** Peer ids are namespaced so a random PeerJS id can never collide with ours. */
 export const PEER_PREFIX = 'syncmusic-';
+
+/**
+ * ONE permanent room.
+ *
+ * Everybody — the host and every speaker — uses the same link, so it can be
+ * printed on a QR code once and reused forever; nothing has to be typed and no
+ * new URL is generated per session. The trade-off is honest and worth stating:
+ * this id is public, so anyone who opens the link joins your room, and only one
+ * host at a time can hold it.
+ */
+export const FIXED_ROOM_ID = `${PEER_PREFIX}main`;
 
 /** Human-typeable code (no 0/O/1/I), also used as the PeerJS room id. */
 export function newRoomCode(): string {

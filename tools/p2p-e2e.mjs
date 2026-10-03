@@ -25,9 +25,10 @@ host.on('pageerror', (e) => console.log('  host error:', e.message));
 await host.goto(`${APP}#/host?mode=direct`, { waitUntil: 'networkidle' });
 await host.getByTestId('create-session').click();
 await host.getByTestId('playlist').waitFor({ timeout: 30000 });
-const link = await host.locator('a[href*="h="]').first().getAttribute('href');
+const link = await host.getByTestId('speaker-link').getAttribute('href');
 if (!link) fail('host did not publish a speaker link');
-log(`✓ direct room open — ${link}`);
+if (/[?&]h=/.test(link)) fail(`the speaker link is still session-specific: ${link}`);
+log(`✓ one permanent room open — ${link}`);
 
 await host.getByTestId('file').setInputFiles(FILE);
 await host.waitForTimeout(2500);
@@ -36,7 +37,7 @@ const speakers = [];
 for (let i = 0; i < N; i++) {
   const p = await page();
   p.on('pageerror', (e) => console.log(`  speaker ${i + 1} error:`, e.message));
-  await p.goto(link, { waitUntil: 'networkidle' });
+  await p.goto(`${link}?mode=direct`, { waitUntil: 'networkidle' });
   await p.getByTestId('enable-speaker').click({ timeout: 30000 });
   speakers.push(p);
   log(`✓ speaker ${i + 1} connected over WebRTC and audio enabled`);
@@ -93,7 +94,7 @@ await host.waitForTimeout(2500);
 
 const late = await page();
 late.on('pageerror', (e) => console.log('  late speaker error:', e.message));
-await late.goto(link, { waitUntil: 'networkidle' });
+await late.goto(`${link}?mode=direct`, { waitUntil: 'networkidle' });
 await late.getByTestId('enable-speaker').click({ timeout: 30000 });
 speakers.push(late);
 log('✓ a late speaker joined while the song was playing');
@@ -113,6 +114,21 @@ await host.waitForTimeout(1500);
 const paused2 = await Promise.all(speakers.map(probe));
 paused2.forEach((s, i) => { if (!s.paused) fail(`speaker ${i + 1} ignored the second PAUSE`); });
 if (paused2.every((s) => s.paused)) log('✓ second PAUSE reached every speaker, including the first one');
+
+/* ---- the host device must play the song too, in the same timeline ---- */
+{
+  const h = await host.evaluate(() => window.__syncHost?.localAudioState ?? null);
+  const others = await Promise.all(speakers.map(probe));
+  if (!h) log('  (host audio element not created — autoplay was blocked in this browser)');
+  else {
+    log(`  host's own output: currentTime=${h.t.toFixed(3)} paused=${h.paused}`);
+    const all = [h.t, ...others.map((s) => s.t)];
+    const sp = (Math.max(...all) - Math.min(...all)) * 1000;
+    log(`✓ the host device followed the same timeline: ${sp.toFixed(1)} ms from the speakers`);
+    if (sp > 300) fail(`the host device is ${sp.toFixed(0)} ms away from the speakers`);
+    if (h.paused !== others[0].paused) fail('the host device ignored the transport command');
+  }
+}
 
 /* ---- the host tab must survive a refresh (room id + library persist) ---- */
 await host.reload({ waitUntil: 'networkidle' });

@@ -2,7 +2,7 @@ import Peer, { DataConnection } from 'peerjs';
 import { AudioTrack, SpeakerInfo, SYNC, TransportState } from '@sync-music/protocol';
 import { projectPosition } from '@sync-music/sync-engine';
 import type { HostState } from '../hostClient';
-import { P2PMessage, PEER_OPTIONS, codeFromRoomId, newRoomCode, roomIdFromCode } from './messages';
+import { FIXED_ROOM_ID, P2PMessage, PEER_OPTIONS, codeFromRoomId } from './messages';
 import { allTracks, clearTracks, deleteTrack, putTrack } from './trackStore';
 
 /**
@@ -57,6 +57,11 @@ export class P2PHostClient {
 
   /** peers whose one-way latency we have actually measured */
   private latency = new Map<string, number>();
+  /** the host's own speaker output (optional, on by default) */
+  private local: HTMLAudioElement | null = null;
+  private localTimer = 0;
+  private localWanted = (localStorage.getItem('sm.hostAudio') ?? '1') === '1';
+
   /** peers that told us their own clock estimate has settled */
   private clockReady = new Map<string, boolean>();
 
@@ -73,7 +78,9 @@ export class P2PHostClient {
   /** Link the speakers open — carries the room, so nothing has to be typed. */
   get speakerUrl() {
     const base = `${location.origin}${import.meta.env.BASE_URL.replace(/\/$/, '')}`;
-    return `${base}/#/speaker?h=${this.roomId}&go=1`;
+    // The room is permanent, so the link carries no session at all: it is the
+    // same URL today and next week, which is what makes a printed QR work.
+    return this.roomId === FIXED_ROOM_ID ? `${base}/#/speaker` : `${base}/#/speaker?h=${this.roomId}&go=1`;
   }
 
   /** Short code for anyone who would rather type than open a link. */
@@ -94,10 +101,12 @@ export class P2PHostClient {
   /* ------------------------------ lifecycle ----------------------------- */
 
   async createSession(name: string) {
-    this.set({ busy: true, error: null, info: 'Opening a direct room…' });
-    this.roomId = roomIdFromCode(newRoomCode());
+    this.set({ busy: true, error: null, info: 'Opening your room…' });
+    // ONE permanent room: the same link and the same QR code work forever,
+    // and nothing new has to be shared every time.
+    this.roomId = FIXED_ROOM_ID;
     try {
-      await this.openPeer(this.roomId);
+      await this.openPeer(this.roomId, 3);
       this.transport = { ...this.transport, state: 'idle', positionAtServerTime: Date.now() };
       this.set({
         sessionId: this.roomId, sessionName: name, conn: 'connected',
@@ -105,9 +114,13 @@ export class P2PHostClient {
       });
       this.pushTransport();
       localStorage.setItem(STORE, JSON.stringify({ roomId: this.roomId, name }));
-      void clearTracks(); // a brand-new room starts with an empty library
+
     } catch (e: any) {
-      this.set({ error: e?.message || 'Could not open a direct room. Check your internet connection.' });
+      this.set({
+        error: e?.message?.includes('taken')
+          ? 'Someone else already has the room open on this link. Close the other host tab and try again.'
+          : (e?.message || 'Could not open the room. Check your internet connection.'),
+      });
     } finally { this.set({ busy: false }); }
   }
 
@@ -254,6 +267,9 @@ export class P2PHostClient {
         }
         break;
       }
+      case 'TRACK_NEED':
+        void this.resendChunks(peerId, m.trackId, m.indexes);
+        break;
       case 'PONG': {
         // speakers answer our latency probe with the same four timestamps
         const rtt = Math.max(0, Date.now() - m.t1 - (m.t3 - m.t2));
@@ -340,7 +356,36 @@ export class P2PHostClient {
    * downloading stutter. Pacing against `bufferedAmount` keeps the channel
    * responsive while the file streams.
    */
-  private async pushTrackTo(peerId: string) {
+  /**
+   * Transfers are serialised. The host has ONE uplink: sending the same file to
+   * three phones at once simply makes all three slower, and the saturated
+   * channels then delay the PLAY/PAUSE messages — which is exactly what the
+   * stuttering felt like.
+   */
+  private queue: Promise<void> = Promise.resolve();
+  private pushTrackTo(peerId: string) {
+    const run = () => this.sendTrack(peerId);
+    this.queue = this.queue.then(run, run);
+    return this.queue;
+  }
+
+  /** Re-send only the chunks a speaker reports as missing. */
+  private async resendChunks(peerId: string, trackId: string, indexes: number[]) {
+    const c = this.conns.get(peerId);
+    const f = this.files.get(trackId);
+    if (!c || !f) return;
+    const CHUNK = 32 * 1024;
+    for (const i of indexes.slice(0, 400)) {
+      if (!c.conn.open) return;
+      await this.waitForDrain(c.conn);
+      this.send(c.conn, {
+        type: 'TRACK_CHUNK', trackId, index: i,
+        bytes: f.bytes.slice(i * CHUNK, Math.min((i + 1) * CHUNK, f.bytes.byteLength)),
+      });
+    }
+  }
+
+  private async sendTrack(peerId: string) {
     const c = this.conns.get(peerId);
     const cur = this.transport.playlist[this.transport.trackIndex];
     if (!c || !cur) return;
@@ -348,7 +393,7 @@ export class P2PHostClient {
     if (!f || c.sent.has(cur.id)) return;
     c.sent.add(cur.id);
 
-    const CHUNK = 64 * 1024;
+    const CHUNK = 32 * 1024;
     const total = Math.ceil(f.bytes.byteLength / CHUNK);
     this.send(c.conn, {
       type: 'TRACK_META', trackId: cur.id, title: cur.title, mime: f.mime,
@@ -366,7 +411,7 @@ export class P2PHostClient {
   }
 
   /** Back-pressure: never let more than ~512 kB sit in the send queue. */
-  private waitForDrain(conn: DataConnection, limit = 512 * 1024) {
+  private waitForDrain(conn: DataConnection, limit = 128 * 1024) {
     const dc: RTCDataChannel | undefined = (conn as any).dataChannel;
     if (!dc || dc.bufferedAmount < limit) return Promise.resolve();
     return new Promise<void>((resolve) => {
@@ -395,6 +440,71 @@ export class P2PHostClient {
     void deleteTrack(id);
     this.files.delete(id);
     this.setPlaylist(this.transport.playlist.map((t) => t.id).filter((x) => x !== id));
+  }
+
+  /* ------------------------- the host's own output ----------------------- */
+
+  get localAudioOn() { return this.localWanted; }
+  /** diagnostics: what this device's own output is doing right now */
+  get localAudioState() {
+    return this.local ? { t: this.local.currentTime, paused: this.local.paused } : null;
+  }
+
+  /**
+   * Play on this phone as well, scheduled against the very same host clock the
+   * speakers use — so the controller is just one more speaker in the room.
+   * Browsers only allow this after a tap, which the toggle itself provides.
+   */
+  setLocalAudio(on: boolean) {
+    this.localWanted = on;
+    localStorage.setItem('sm.hostAudio', on ? '1' : '0');
+    if (!on) { this.stopLocal(); } else { this.applyLocal(); }
+    this.set({});
+  }
+
+  private stopLocal() {
+    window.clearTimeout(this.localTimer);
+    if (this.local) { try { this.local.pause(); } catch {} }
+  }
+
+  private localEl() {
+    if (!this.local) {
+      const a = new Audio();
+      a.preload = 'auto';
+      a.addEventListener('ended', () => { if (this.transport.autoNext) this.next(); });
+      this.local = a;
+    }
+    return this.local;
+  }
+
+  /** Mirror the current transport onto this device's own audio element. */
+  private applyLocal() {
+    if (!this.localWanted) return;
+    const cur = this.transport.playlist[this.transport.trackIndex];
+    const a = this.localEl();
+    a.volume = this.transport.volume;
+    if (!cur) { this.stopLocal(); return; }
+    if (a.dataset.id !== cur.id) { a.src = cur.url; a.dataset.id = cur.id; a.load(); }
+
+    window.clearTimeout(this.localTimer);
+    if (this.transport.state !== 'playing') {
+      try { a.pause(); } catch {}
+      a.currentTime = Math.max(0, this.transport.position);
+      return;
+    }
+    const at = this.transport.positionAtServerTime;
+    const startIn = at - Date.now();
+    const begin = () => {
+      // Same scheduling the speakers do: seek to where the timeline will be
+      // at this instant, then start.
+      const late = Math.max(0, Date.now() - at) / 1000;
+      try { a.currentTime = Math.max(0, this.transport.position + late); } catch {}
+      void a.play().catch(() => {
+        this.set({ info: 'Tap PLAY once more to let this phone play sound too.' });
+      });
+    };
+    if (startIn <= 12) begin();
+    else this.localTimer = window.setTimeout(begin, startIn - 8);
   }
 
   /* ------------------------------- transport ---------------------------- */
@@ -432,6 +542,7 @@ export class P2PHostClient {
     // make sure everybody has the bytes before the scheduled moment
     this.conns.forEach((_c, p) => void this.pushTrackTo(p));
     this.broadcast({ type: 'PLAY', seq: ++this.cmdSeq, trackId: track.id, position: pos, startAt });
+    this.applyLocal();
   }
 
   pause() {
@@ -440,6 +551,7 @@ export class P2PHostClient {
     this.transport = { ...this.transport, state: 'paused', position: pos, positionAtServerTime: Date.now() };
     this.pushTransport();
     this.broadcast({ type: 'PAUSE', seq: ++this.cmdSeq, position: pos });
+    this.applyLocal();
   }
 
   toggle() { this.playing ? this.pause() : this.play(); }
@@ -448,6 +560,7 @@ export class P2PHostClient {
     this.transport = { ...this.transport, state: 'stopped', position: 0, positionAtServerTime: Date.now() };
     this.pushTransport();
     this.broadcast({ type: 'STOP', seq: ++this.cmdSeq });
+    this.applyLocal();
   }
 
   seek(position: number) {
@@ -457,6 +570,7 @@ export class P2PHostClient {
     this.transport = { ...this.transport, position, positionAtServerTime: applyAt };
     this.pushTransport();
     this.broadcast({ type: 'SEEK', seq: ++this.cmdSeq, trackId: track.id, position, applyAt });
+    this.applyLocal();
   }
 
   next() { this.skip(1); }
@@ -472,6 +586,7 @@ export class P2PHostClient {
     this.transport = { ...this.transport, volume: v };
     this.pushTransport();
     this.broadcast({ type: 'VOLUME', seq: ++this.cmdSeq, volume: v });
+    this.applyLocal();
   }
 
   resync() {
@@ -526,6 +641,7 @@ export class P2PHostClient {
 
   async end() {
     this.broadcast({ type: 'STOP', seq: ++this.cmdSeq });
+    this.applyLocal();
     this.conns.forEach((c) => { try { c.conn.close(); } catch {} });
     this.conns.clear();
     try { this.peer?.destroy(); } catch {}

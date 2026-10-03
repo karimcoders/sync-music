@@ -29,7 +29,7 @@ export default function JoinCard({ link, code }: { link: string; code?: string }
   return (
     <Card>
       <Stack gap={12}>
-        <div className="kicker">Invite phones — link, QR or code</div>
+        <div className="kicker">Invite phones — this link never changes</div>
 
         <Row>
           <a className="link-strong" data-testid="speaker-link" href={link} target="_blank" rel="noreferrer">{link}</a>

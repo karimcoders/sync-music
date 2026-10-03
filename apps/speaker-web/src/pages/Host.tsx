@@ -27,6 +27,7 @@ export default function Host({ go }: { go: (p: string) => void }) {
         : new HostClient((st) => setS({ ...st }));
       created = c;
       ref.current = c;
+      (window as any).__syncHost = c; // diagnostics / e2e only
       setS({ ...c.state });
       const saved = c.saved;
       if (saved) c.attach(saved.sessionId, saved.token); // survives a refresh
@@ -133,6 +134,16 @@ export default function Host({ go }: { go: (p: string) => void }) {
           <span className="dim mono">{fmtTime(pos)}</span>
           <span className="dim mono">-{fmtTime(Math.max(0, dur - pos))}</span>
         </Row>
+        {c instanceof P2PHostClient && (
+          <Row style={{ marginTop: 12 }}>
+            <span className="dim">Play on this phone too</span>
+            <button
+              className={`chip ${c.localAudioOn ? 'active' : ''}`}
+              data-testid="host-audio"
+              onClick={() => { c.setLocalAudio(!c.localAudioOn); setS({ ...c.state }); }}
+            >{c.localAudioOn ? 'On' : 'Off'}</button>
+          </Row>
+        )}
         <div className="transport">
           <RoundBtn label="Stop" onClick={() => c?.stop()}>{Icons.stop}</RoundBtn>
           <RoundBtn label="Previous track" onClick={() => c?.prev()}>{Icons.prev}</RoundBtn>
