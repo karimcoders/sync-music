@@ -1,12 +1,17 @@
 {
   "name": "Sync Music Speaker",
   "short_name": "Speaker",
-  "start_url": "/speaker",
-  "scope": "/",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#0b0d14",
   "theme_color": "#0b0d14",
   "icons": [
-    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
   ]
 }
