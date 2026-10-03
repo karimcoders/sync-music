@@ -200,6 +200,17 @@ async function main() {
     return { playlist: tracks };
   });
 
+  /* --------- host console (browser stand-in for the Android host) -------- */
+  // A testing console that speaks the exact same REST + WS protocol as the
+  // Android host app — useful before you have the APK installed.
+  const hostConsole = path.resolve(__dirname, '../public/host.html');
+  const hostConsoleFallback = path.resolve(process.cwd(), 'server/public/host.html');
+  app.get('/host', async (req, reply) => {
+    const file = fs.existsSync(hostConsole) ? hostConsole : hostConsoleFallback;
+    if (!fs.existsSync(file)) return reply.code(404).send({ error: 'Host console not bundled.' });
+    return reply.type('text/html; charset=utf-8').send(fs.createReadStream(file));
+  });
+
   /* ------------------------------ websocket ----------------------------- */
   app.get('/ws', { websocket: true }, (socket) => attachSocket(hub, socket as any));
 

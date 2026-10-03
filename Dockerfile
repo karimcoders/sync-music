@@ -18,6 +18,7 @@ COPY --from=build /src/node_modules ./node_modules
 COPY --from=build /src/packages ./packages
 COPY --from=build /src/server/dist ./server/dist
 COPY --from=build /src/server/package.json ./server/package.json
+COPY --from=build /src/server/public ./server/public
 COPY --from=build /src/apps/speaker-web/dist ./web
 RUN mkdir -p /data && addgroup -S app && adduser -S app -G app && chown -R app /data /app
 USER app
