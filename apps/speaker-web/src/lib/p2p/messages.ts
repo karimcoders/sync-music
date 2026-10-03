@@ -32,7 +32,12 @@ export type P2PMessage =
   | { type: 'VOLUME'; volume: number }
   | { type: 'RENAME'; name: string }
   // telemetry ------------------------------------------------------------
-  | { type: 'STATUS'; position: number; atHostTime: number; rate: number; playing: boolean; buffered: number };
+  | {
+      type: 'STATUS'; position: number; atHostTime: number; rate: number; playing: boolean;
+      buffered: number;
+      /** our current clock-sync quality, so the host knows if we are ready */
+      clockRtt: number; clockSynced: boolean; clockSamples: number;
+    };
 
 /** Peer ids are namespaced so a random PeerJS id can never collide with ours. */
 export const PEER_PREFIX = 'syncmusic-';
@@ -47,5 +52,26 @@ export function newRoomCode(): string {
 export const roomIdFromCode = (code: string) => PEER_PREFIX + code.trim().toLowerCase();
 export const codeFromRoomId = (id: string) => id.replace(PEER_PREFIX, '');
 
-/** Public, free, account-less PeerJS broker. It only brokers the connection. */
-export const PEER_OPTIONS = { debug: 0 as const };
+/**
+ * Public, free, account-less PeerJS broker. It only introduces the two
+ * browsers; audio and control messages go peer to peer.
+ *
+ * STUN alone is not enough in practice: two phones on mobile data sit behind
+ * carrier-grade NAT, which usually blocks a direct path, and the connection
+ * silently never opens. The free OpenRelay TURN servers relay the traffic in
+ * that case — slower, but it actually connects. They are public credentials
+ * published by metered.ca for exactly this purpose (no secret of ours is
+ * exposed here).
+ */
+export const PEER_OPTIONS = {
+  debug: 0 as const,
+  config: {
+    iceServers: [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:global.stun.twilio.com:3478'] },
+      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    ],
+    iceCandidatePoolSize: 4,
+  },
+};

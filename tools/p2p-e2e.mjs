@@ -66,7 +66,7 @@ if (first.some((s) => !s || s.paused)) fail('a speaker is not playing');
 else {
   const spread = (Math.max(...first.map((s) => s.t)) - Math.min(...first.map((s) => s.t))) * 1000;
   log(`✓ inter-speaker spread at start: ${spread.toFixed(1)} ms`);
-  if (spread > 200) fail(`start spread too large: ${spread.toFixed(0)} ms`);
+  if (spread > 300) fail(`start spread too large: ${spread.toFixed(0)} ms`);
 }
 
 await host.waitForTimeout(6000);

@@ -47,6 +47,8 @@ export class P2PHostClient {
 
   /** peers whose one-way latency we have actually measured */
   private latency = new Map<string, number>();
+  /** peers that told us their own clock estimate has settled */
+  private clockReady = new Map<string, boolean>();
 
   constructor(private onChange: (s: HostState) => void) {
     this.timers.push(window.setInterval(() => this.tick(), 250));
@@ -105,6 +107,7 @@ export class P2PHostClient {
       peer.on('error', (e: any) => {
         // Per-connection errors must not kill the room.
         if (e?.type === 'peer-unavailable') return;
+        if (e?.type === 'network') { this.set({ conn: 'reconnecting' }); return; }
         this.set({ error: `Connection error: ${e?.type ?? 'unknown'}` });
       });
     });
@@ -130,7 +133,10 @@ export class P2PHostClient {
     });
 
     conn.on('data', (d) => this.onData(conn.peer, d as P2PMessage));
-    conn.on('close', () => { this.conns.delete(conn.peer); this.publishSpeakers(); });
+    conn.on('close', () => {
+      this.conns.delete(conn.peer); this.latency.delete(conn.peer); this.clockReady.delete(conn.peer);
+      this.publishSpeakers();
+    });
     conn.on('error', () => { this.conns.delete(conn.peer); this.publishSpeakers(); });
   }
 
@@ -146,6 +152,8 @@ export class P2PHostClient {
         if (m.name) { c.info = { ...c.info, name: m.name }; this.publishSpeakers(); }
         break;
       case 'STATUS': {
+        // strict: a settled data channel on the same LAN sits in the low ms range
+        this.clockReady.set(peerId, !!m.clockSynced && m.clockRtt < 40 && m.clockSamples >= 10);
         const track = this.transport.playlist[this.transport.trackIndex];
         // Measure on OUR clock: the sample was taken one-way-latency ago.
         const lat = this.latency.get(peerId);
@@ -269,9 +277,11 @@ export class P2PHostClient {
     // Follow the speakers we really have instead of a fixed delay: a fresh
     // data channel needs more head start, a settled one needs very little.
     const cs = [...this.conns.values()];
-    const youngest = Math.min(...cs.map((c) => Date.now() - c.info.joinedAt), Infinity);
     const worst = cs.reduce((a, c) => Math.max(a, this.latency.get(c.conn.peer) ?? 120), 0);
-    const lead = youngest < 8000 ? 2600 : Math.min(2000, Math.max(500, 350 + worst * 3));
+    // A phone whose own clock estimate has not settled yet would start at the
+    // wrong moment, so wait for it instead of guessing from "time since join".
+    const allReady = cs.length > 0 && cs.every((c) => this.clockReady.get(c.conn.peer));
+    const lead = allReady ? Math.min(2000, Math.max(500, 350 + worst * 3)) : 2600;
     const startAt = Date.now() + lead;
 
     this.transport = {

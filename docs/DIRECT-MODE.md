@@ -58,6 +58,20 @@ The connection is brokered by the free public PeerJS server, which only
 introduces the two browsers to each other; the audio and the control messages go
 peer to peer and never touch it.
 
+### Phones on different networks
+
+Two phones on mobile data usually sit behind carrier-grade NAT, which blocks a
+direct peer-to-peer path — the data channel then never opens. The app therefore
+also offers the free public **OpenRelay TURN** servers, which relay the traffic
+when no direct path exists. That costs a little extra latency but it connects.
+If a speaker still cannot reach the host after ~12 s it now says so instead of
+spinning forever; putting both phones on the same Wi-Fi or hotspot always works.
+
+### Joining
+
+Three ways, all equivalent: open the **link**, **scan the QR code** with the
+in-app scanner (camera stays on the device), or type the **6-letter code**.
+
 ## Test it yourself
 
 ```bash

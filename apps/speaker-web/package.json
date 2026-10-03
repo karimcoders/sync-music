@@ -11,6 +11,7 @@
   "dependencies": {
     "@sync-music/protocol": "1.0.0",
     "@sync-music/sync-engine": "1.0.0",
+    "jsqr": "^1.4.0",
     "peerjs": "^1.5.5",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",

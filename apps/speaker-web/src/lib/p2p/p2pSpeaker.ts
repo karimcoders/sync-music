@@ -75,7 +75,21 @@ export class P2PSpeakerClient {
     const conn = this.peer!.connect(this.roomId, { reliable: true });
     this.conn = conn;
 
+    // WebRTC can fail silently: if no path is found the channel simply never
+    // opens. Say so instead of spinning forever.
+    const watchdog = window.setTimeout(() => {
+      if (!conn.open) {
+        this.set({
+          error: 'Could not reach the host. Both phones need internet, and the host tab must '
+            + 'stay open. If one of you is on a restricted network, try the same Wi-Fi or '
+            + 'mobile hotspot.',
+        });
+      }
+    }, 12000);
+    this.timers.push(watchdog);
+
     conn.on('open', () => {
+      window.clearTimeout(watchdog);
       this.retry = 0;
       this.set({ conn: 'connected', sessionId: this.roomId, error: null, info: null,
         phase: this.audioEnabled ? 'AUDIO_READY' : 'AUDIO_DISABLED', hostOnline: true });
@@ -297,11 +311,15 @@ export class P2PSpeakerClient {
         void a.play()
           .then(() => {
             this.set({ phase: 'PLAYING', playing: true });
-            window.setTimeout(() => {
-              if (!this.transportPlaying || a.paused) return;
-              const t = this.targetPosition();
-              if (Math.abs(a.currentTime - t) > 0.12) { try { a.currentTime = t; } catch {} }
-            }, 400);
+            // Slow decoders can begin hundreds of ms late, and a data channel's
+            // clock keeps improving in the first seconds, so check twice.
+            for (const delay of [400, 1500]) {
+              window.setTimeout(() => {
+                if (!this.transportPlaying || a.paused) return;
+                const t = this.targetPosition();
+                if (Math.abs(a.currentTime - t) > 0.08) { try { a.currentTime = t; } catch {} }
+              }, delay);
+            }
           })
           .catch(() => this.set({ phase: 'AUDIO_DISABLED', error: 'Your browser blocked audio. Tap Enable Speaker.' }));
       }, Math.max(0, lead - 5));
@@ -332,6 +350,8 @@ export class P2PSpeakerClient {
       this.send({
         type: 'STATUS', position: a?.currentTime ?? 0, atHostTime: this.clock.now(),
         rate: a?.playbackRate ?? 1, playing: !!a && !a.paused, buffered: Math.max(0, buffered),
+        clockRtt: Math.round(this.clock.rtt), clockSynced: this.clock.synced,
+        clockSamples: this.clock.sampleCount,
       });
       this.timers.push(window.setTimeout(report, 600));
     };

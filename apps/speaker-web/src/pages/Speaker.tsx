@@ -3,6 +3,7 @@ import { SpeakerClient, type UiState } from '../lib/client';
 import { P2PSpeakerClient } from '../lib/p2p/p2pSpeaker';
 import { roomParam } from '../lib/mode';
 import { roomIdFromCode } from '../lib/p2p/messages';
+import QrScanner from '../components/QrScanner';
 import { backendOrigin, setBackend } from '../lib/backend';
 import { Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime } from '../ui';
 
@@ -17,6 +18,7 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
   const room = roomParam();
   const wanted = urlParam('s');          // session id straight from the host's link
   const [code, setCode] = useState('');  // typed join code
+  const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
     // A link that carries ?h=<room> means the host has no backend and is
@@ -89,6 +91,10 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
             ))}
             {s.error && <div className="err-text">{s.error}</div>}
 
+            <Button testId="scan-qr" variant="ghost" onClick={() => setScanning(true)}>
+              📷  SCAN THE HOST’S QR CODE
+            </Button>
+
             <div className="divider"><span>or enter the code the host shows</span></div>
             <Row>
               <input
@@ -102,6 +108,12 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
             </Row>
           </Stack>
         </Card>
+        {scanning && (
+          <QrScanner
+            onClose={() => setScanning(false)}
+            onResult={(text) => { setScanning(false); openScanned(text); }}
+          />
+        )}
         {!room && <BackendSetting promote={failed} />}
         <button className="chip" style={{ alignSelf: 'center' }} onClick={() => go('/')}>← Home</button>
       </Shell>
@@ -235,4 +247,20 @@ function joinByCode(code: string, sessions: Discovered[], c: SpeakerClient | P2P
   const base = `${location.origin}${import.meta.env.BASE_URL.replace(/\/$/, '')}`;
   location.href = `${base}/#/speaker?h=${roomIdFromCode(lower)}&go=1`;
   location.reload();
+}
+
+
+/**
+ * A scanned QR usually contains the full speaker link, but people also share
+ * screenshots of just the code — accept both.
+ */
+function openScanned(text: string) {
+  const v = text.trim();
+  if (/^https?:\/\//i.test(v)) { location.href = v; location.reload(); return; }
+  const clean = v.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (clean.length >= 4) {
+    const base = `${location.origin}${import.meta.env.BASE_URL.replace(/\/$/, '')}`;
+    location.href = `${base}/#/speaker?h=${roomIdFromCode(clean)}&go=1`;
+    location.reload();
+  }
 }
