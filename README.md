@@ -1,5 +1,10 @@
 # Sync Music — 1 Host Android app → N browser speaker phones
 
+**Live speaker page:** https://karimcoders.github.io/sync-music/ ·
+**Backend image:** `ghcr.io/karimcoders/sync-music:latest` ·
+see [`docs/DEPLOY-github.md`](docs/DEPLOY-github.md) — the static page is live, the
+backend still has to run on a server (Pages cannot host WebSockets).
+
 One Android phone is the **Host**. Every other phone just opens a web page and taps
 **Enable Speaker**. No client app, no QR code, no room PIN. Playback is scheduled
 against a shared, NTP-style **server clock**, so the phones start together and stay
