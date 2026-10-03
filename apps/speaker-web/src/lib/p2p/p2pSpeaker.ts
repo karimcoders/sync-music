@@ -121,9 +121,14 @@ export class P2PSpeakerClient {
     // dialled in small waves; the first one that answers wins and the rest
     // are dropped.
     const all = this.roomId === FIXED_ROOM_ID ? ROOM_SLOTS : [this.roomId];
-    const wave = this.waveIndex % Math.ceil(all.length / 4);
+    // Two at a time per broker: a phone negotiating a dozen ICE sessions at
+    // once spends its CPU and radio on that instead of on smooth playback.
+    // All four slots at once (there are only four), one broker at a time:
+    // the live host answers within a second or two and the rest are dropped.
+    const per = 4;
+    const wave = this.waveIndex % Math.ceil(all.length / per);
     this.waveIndex++;
-    const targets = all.length > 4 ? all.slice(wave * 4, wave * 4 + 4) : all;
+    const targets = all.length > per ? all.slice(wave * per, wave * per + per) : all;
     const tried = targets.map((t) => peer.connect(t, { reliable: true }));
     let won: DataConnection | null = null;
 
@@ -324,14 +329,10 @@ export class P2PSpeakerClient {
         break;
       }
 
-      case 'CLOCK_BIAS': {
-        // half of the host-measured error, clamped: converges in a couple of
-        // reports without ever ping-ponging.
-        const next = this.clockBias + m.deltaMs;
-        this.clockBias = Math.max(-1500, Math.min(1500, next));
-        this.realign();
+      case 'CLOCK_BIAS':
+        // Deliberately ignored: see the note in p2pHost.ts. Kept in the wire
+        // format so an older host cannot break a newer speaker.
         break;
-      }
 
       case 'STATE': {
         // full repair snapshot from the host
@@ -479,7 +480,7 @@ export class P2PSpeakerClient {
    * No browser API reports it, so this is a manual nudge the listener can set
    * once per phone; it is remembered on that device.
    */
-  /** Host-measured correction of our clock estimate (see CLOCK_BIAS). */
+  /** Always 0 — the host-driven bias loop was removed (see p2pHost.ts). */
   private clockBias = 0;
 
   get outputOffsetMs() { return Number(localStorage.getItem('sm.outOffset') || 0); }

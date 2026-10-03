@@ -88,7 +88,7 @@ export const FIXED_ROOM_ID = `${PEER_PREFIX}main`;
  * one and a speaker simply tries them in the same order until one answers.
  * The link the user shares never changes.
  */
-export const ROOM_SLOTS = [FIXED_ROOM_ID, ...Array.from({ length: 11 }, (_, i) => `${FIXED_ROOM_ID}-${i + 2}`)];
+export const ROOM_SLOTS = [FIXED_ROOM_ID, ...Array.from({ length: 3 }, (_, i) => `${FIXED_ROOM_ID}-${i + 2}`)];
 
 /** Human-typeable code (no 0/O/1/I), also used as the PeerJS room id. */
 export function newRoomCode(): string {

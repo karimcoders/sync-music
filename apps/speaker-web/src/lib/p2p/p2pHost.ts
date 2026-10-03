@@ -364,25 +364,12 @@ export class P2PHostClient {
 
         // --- a phone whose own clock estimate is biased (asymmetric relay):
         // hand back half of the error we measured, at most once per 2 s.
-        const steady = Math.abs(m.selfDriftMs ?? 0) < 30;   // its audio is on ITS timeline
-        const err = Math.round(drift * 1000);
-        if (m.playing && this.transport.state === 'playing' && steady
-            && this.clockReady.get(peerId) && Math.abs(err) > 100
-            && Date.now() - (c.lastBias ?? 0) > 2500) {
-          // Only act on two consecutive measurements that agree: a single
-          // sample can be a scheduling hiccup, and correcting on noise is how
-          // a bias loop starts oscillating.
-          const prev = c.lastErr;
-          c.lastErr = err;
-          if (prev !== undefined && Math.sign(prev) === Math.sign(err) && Math.abs(prev) > 100) {
-            c.lastBias = Date.now();
-            c.lastErr = undefined;
-            const delta = Math.max(-150, Math.min(150, Math.round(-err * 0.35)));
-            this.send(c.conn, { type: 'CLOCK_BIAS', deltaMs: delta });
-          }
-        } else if (Math.abs(err) <= 100) {
-          c.lastErr = undefined;
-        }
+        // NOTE: there used to be a CLOCK_BIAS loop here — the host handing a
+        // speaker a correction for its own clock estimate. It made real phones
+        // worse, not better: the host's own latency estimate is noisy, so the
+        // correction chased that noise and the phones audibly wandered. The
+        // speaker's own NTP-style exchange plus the drift policy is steadier.
+        // Do not re-add it without an end-to-end measurement on real phones.
 
         // --- repair: a speaker may have missed a command or the audio itself
         const want = track?.id ?? null;
@@ -536,10 +523,16 @@ export class P2PHostClient {
 
     for (let i = 0; i < total; i++) {
       if (!this.conns.has(peerId) || !c.conn.open) { c.sent.delete(cur.id); return; }
-      // A command must never queue behind megabytes of audio: give the
-      // channel a clear moment right after one was sent.
+      // Two things matter and they pull in opposite directions: a command
+      // must never queue behind megabytes of audio, and the track still has
+      // to arrive quickly. So the channel is kept almost empty for a moment
+      // around a transport command, and allowed to run full the rest of the
+      // time.
+      // 48 kB in flight is still ~8 Mbit/s at a 50 ms round trip, so this
+      // costs nothing in practice and it is what keeps a PAUSE from queueing
+      // behind megabytes of audio. (Raising it measurably broke PAUSE.)
       const since = Date.now() - this.lastCommandAt;
-      if (since < 150) await new Promise((r) => setTimeout(r, 150 - since));
+      if (since < 300) await new Promise((r) => setTimeout(r, Math.max(0, 150 - since)));
       await this.waitForDrain(c.conn);
       this.send(c.conn, {
         type: 'TRACK_CHUNK', trackId: cur.id, index: i,

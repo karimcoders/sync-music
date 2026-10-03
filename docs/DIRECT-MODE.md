@@ -214,3 +214,21 @@ What it is **not**: a calibrated SPL meter. The numbers are relative to the mic
 input (dBFS), Android applies its own filtering, and the low end especially is
 approximate. It is reliable for comparisons — before vs after, spot A vs spot
 B, left vs right — which is what a sound check actually needs.
+
+## Removed again: the host-driven clock-bias loop
+
+A previous build had the host hand each speaker a correction for its own clock
+estimate (`CLOCK_BIAS`). On paper it fixes an asymmetric relay; in practice it
+made real phones **worse** — the host's latency estimate is noisy, the
+correction chased that noise, and phones audibly wandered. It is gone. The
+message is still accepted and ignored so an older host cannot upset a newer
+speaker. Do not re-add it without measurements on real phones.
+
+Two other things that matter for how it sounds, learned by measuring:
+
+* **48 kB is the right amount of audio in flight.** Raising it to 256 kB
+  measurably broke PAUSE — the command sat behind queued audio for about a
+  second. 48 kB is still ~8 Mbit/s at a 50 ms round trip, so it costs nothing.
+* **Four room slots, dialled together.** A phone that negotiates a dozen ICE
+  sessions at once spends its CPU and radio on that instead of on smooth
+  playback; four is enough to step over ids the broker is still holding.

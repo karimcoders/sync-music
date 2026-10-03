@@ -123,27 +123,29 @@ if (paused2.every((s) => s.paused)) log('✓ second PAUSE reached every speaker,
 
 /* ---- a speaker must keep playing when its screen goes off ------------ */
 {
+  // Restart from the top: by this point the 30 s fixture has nearly run out,
+  // and "ended" would look exactly like "stopped when the screen went off".
+  await host.evaluate(() => {
+    const h = window.__syncHost;
+    h.playTrack(h.state.transport.playlist[0].id);
+  });
+  await host.waitForTimeout(4000);
+
   const victim = speakers[0];
-  await victim.evaluate(() => {
-    // Closest thing to a locked screen we can drive: the page goes hidden.
-    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
-    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+  const hide = (hidden) => victim.evaluate((h) => {
+    Object.defineProperty(document, 'visibilityState', { value: h ? 'hidden' : 'visible', configurable: true });
+    Object.defineProperty(document, 'hidden', { value: h, configurable: true });
     document.dispatchEvent(new Event('visibilitychange'));
-  });
-  await host.getByTestId('play').click();          // resume
+  }, hidden);
+
+  await hide(true);
   await host.waitForTimeout(5000);
-  const hidden = await probe(victim);
-  log(`  hidden speaker: currentTime=${hidden.t.toFixed(3)} paused=${hidden.paused}`);
-  if (hidden.paused || hidden.t < 1) fail('a speaker stopped when its screen went off');
+  const off = await probe(victim);
+  log(`  hidden speaker: currentTime=${off.t.toFixed(3)} paused=${off.paused}`);
+  if (off.paused || off.t < 1) fail('a speaker stopped when its screen went off');
   else log('✓ a speaker with the screen off keeps playing');
-  await victim.evaluate(() => {
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
-    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
+  await hide(false);
   await host.waitForTimeout(1500);
-  await host.getByTestId('play').click();          // back to paused for the next step
-  await host.waitForTimeout(1200);
 }
 
 /* ---- the host device must play the song too, in the same timeline ---- */
