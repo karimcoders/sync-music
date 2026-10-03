@@ -74,6 +74,12 @@ first.forEach((s, i) => log(`  speaker ${i + 1}: currentTime=${s?.t?.toFixed(3)}
 if (first.some((s) => !s || s.paused)) fail('a speaker is not playing after PLAY');
 if (first.some((s) => !s || s.t <= 0.05)) fail('a speaker is not advancing through the audio');
 
+const sid = await host.evaluate(() => JSON.parse(localStorage.getItem('sync-music.host')).sessionId);
+const srv = await (await fetch(`${base}/api/session/${sid}/state`)).json();
+const vsServer = first.map((s) => (s.t - srv.transport.position) * 1000);
+log(`✓ offset vs server timeline: ${vsServer.map((v) => v.toFixed(0) + 'ms').join(', ')}`);
+if (vsServer.some((v) => Math.abs(v) > 250)) fail('a speaker is off the server timeline by more than 250 ms');
+
 const spread = Math.max(...first.map((s) => s.t)) - Math.min(...first.map((s) => s.t));
 log(`✓ inter-speaker spread at start: ${(spread * 1000).toFixed(1)} ms`);
 if (spread > 0.25) fail(`speakers are more than 250 ms apart (${(spread * 1000).toFixed(0)} ms)`);

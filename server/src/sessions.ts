@@ -308,6 +308,20 @@ export class SessionHub {
     return t.playlist.find((p) => p.id === t.trackId) ?? null;
   }
 
+  /**
+   * Transport as it should be reported to a client.
+   *
+   * While a SYNC_PLAY is still in its pre-roll (positionAtServerTime is in the
+   * FUTURE) the base must be sent untouched. Re-projecting it onto "now" would
+   * tell a late joiner "you are playing, at position 0, as of now", and it would
+   * start a full lead-time (1.5 s) ahead of everybody else.
+   */
+  reportableTransport(sessionId: string, at = Date.now()): TransportState {
+    const t = this.transport(sessionId);
+    if (t.positionAtServerTime > at) return { ...t };
+    return { ...t, position: this.serverPosition(sessionId, at), positionAtServerTime: at };
+  }
+
   /** Authoritative position right now, projected from the last state change. */
   serverPosition(sessionId: string, at = Date.now()) {
     const t = this.transport(sessionId);
@@ -496,8 +510,13 @@ export class SessionHub {
   async resyncAll(sessionId: string) {
     const t = this.transport(sessionId);
     const at = Date.now() + SYNC.APPLY_LEAD_MS;
+    // If a scheduled start has not happened yet, resend that exact schedule.
+    const pending = t.positionAtServerTime > at;
     await this.fanout(sessionId, {
-      type: 'RESYNC', position: this.serverPosition(sessionId, at), atServerTime: at, playing: t.state === 'playing',
+      type: 'RESYNC',
+      position: pending ? t.position : this.serverPosition(sessionId, at),
+      atServerTime: pending ? t.positionAtServerTime : at,
+      playing: t.state === 'playing',
     }, false);
   }
 
@@ -517,7 +536,7 @@ export class SessionHub {
       sessionName: ls.rec.name,
       hostOnline: ls.hostConns.size > 0,
       speakerCount: ls.speakerConns.size,
-      transport: { ...ls.rec.transport, position: this.serverPosition(sessionId) , positionAtServerTime: Date.now() },
+      transport: this.reportableTransport(sessionId),
       you,
     };
   }

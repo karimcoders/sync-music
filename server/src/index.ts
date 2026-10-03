@@ -80,7 +80,7 @@ async function main() {
       sessionId: id,
       name: ls.rec.name,
       speakerCount: await hub.speakerCount(id),
-      transport: { ...ls.rec.transport, position: hub.serverPosition(id), positionAtServerTime: Date.now() },
+      transport: hub.reportableTransport(id),
       serverTime: Date.now(),
     };
   });

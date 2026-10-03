@@ -506,10 +506,24 @@ export class SpeakerClient {
     else a.addEventListener('loadeddata', arm, { once: true });
   }
 
-  /** Join an already-running timeline (late join / reconnect / resync). */
+  /**
+   * Join a timeline (late join / reconnect / resync).
+   *
+   * Careful: the timeline may not have STARTED yet — right after SYNC_PLAY the
+   * authoritative base time sits ~1.5 s in the future. Playing immediately in
+   * that case makes this phone run a full lead-time ahead of everyone else,
+   * so a future start is scheduled instead of played now.
+   */
   private catchUp() {
     const a = this.audio;
     if (!a || !this.audioEnabled) return;
+
+    const untilStart = this.baseServerTime - this.clock.now();
+    if (this.transportPlaying && untilStart > 20) {
+      this.schedulePlay(this.basePosition, this.baseServerTime);
+      return;
+    }
+
     const target = this.targetPosition();
     try { a.currentTime = target; } catch {}
     if (this.transportPlaying) {

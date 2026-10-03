@@ -1,5 +1,28 @@
 # Test it with your own phones right now (no server, no APK)
 
+## Permanent address (recommended)
+
+The web app is hosted for free on GitHub Pages and never expires:
+
+```
+APP (permanent):  https://karimcoders.github.io/sync-music/
+HOST CONSOLE:     https://karimcoders.github.io/sync-music/#/host
+SPEAKER PAGE:     https://karimcoders.github.io/sync-music/#/speaker
+```
+
+Pages serves only the frontend, so it needs a backend to talk to. Two ways to point it:
+
+* add `?api=https://your-backend` to the URL, e.g.
+  `https://karimcoders.github.io/sync-music/#/host?api=https://my-app.onrender.com`
+* or open the **Server address** field on the page and paste the backend URL once
+  (it is remembered in that browser).
+
+Get a permanent backend in one click with your own free Render account — the
+**Deploy to Render** button in the README uses `render.yaml`. Free instances sleep after
+~15 minutes idle and take ~30 s to wake up.
+
+## Temporary tunnel (while this workspace is running)
+
 A free Cloudflare quick tunnel is pointing at the backend running in this workspace, so
 there is a **real public HTTPS + WSS address** you can open on any phone:
 
@@ -84,3 +107,10 @@ The tunnel stopped with the workspace. Two permanent options:
   `cloudflared tunnel --url http://localhost:8080` — you get a fresh public HTTPS URL.
 * **Any host with Docker:** `docker run -p 8080:8080 ghcr.io/karimcoders/sync-music:latest`
   behind HTTPS, or `sudo ./deploy/deploy.sh your-domain.com`.
+
+## What the screenshots show
+
+![Home](shot-home.png)
+![Host, before the session starts](shot-host-start.png)
+![Host, live with a speaker connected](shot-host-live.png)
+![Speaker phone](shot-speaker.png)
