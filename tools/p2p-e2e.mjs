@@ -85,6 +85,35 @@ const paused = await Promise.all(speakers.map(probe));
 if (paused.some((s) => !s.paused)) fail('PAUSE did not reach every speaker');
 else log('✓ PAUSE stopped every speaker');
 
+/* ---- a phone that joins late must get everything, and every phone must ----
+   ---- keep receiving commands afterwards (regression: only the newest   ----
+   ---- speaker reacted)                                                  ---- */
+await host.getByTestId('play').click(); // resume
+await host.waitForTimeout(2500);
+
+const late = await page();
+late.on('pageerror', (e) => console.log('  late speaker error:', e.message));
+await late.goto(link, { waitUntil: 'networkidle' });
+await late.getByTestId('enable-speaker').click({ timeout: 30000 });
+speakers.push(late);
+log('✓ a late speaker joined while the song was playing');
+await host.waitForTimeout(6000);
+
+const all = await Promise.all(speakers.map(probe));
+all.forEach((s, i) => log(`  speaker ${i + 1}: currentTime=${s?.t?.toFixed(3)} paused=${s?.paused}`));
+if (all.some((s) => !s || s.paused)) fail('a speaker is not playing after the late join');
+else {
+  const sp = (Math.max(...all.map((s) => s.t)) - Math.min(...all.map((s) => s.t))) * 1000;
+  log(`✓ spread including the late joiner: ${sp.toFixed(1)} ms`);
+  if (sp > 300) fail(`late-join spread too large: ${sp.toFixed(0)} ms`);
+}
+
+await host.getByTestId('play').click(); // pause again — must reach ALL
+await host.waitForTimeout(1500);
+const paused2 = await Promise.all(speakers.map(probe));
+paused2.forEach((s, i) => { if (!s.paused) fail(`speaker ${i + 1} ignored the second PAUSE`); });
+if (paused2.every((s) => s.paused)) log('✓ second PAUSE reached every speaker, including the first one');
+
 await browser.close();
 console.log(bad ? '\nSOME CHECKS FAILED' : '\nALL CHECKS PASSED');
 process.exit(bad ? 1 : 0);

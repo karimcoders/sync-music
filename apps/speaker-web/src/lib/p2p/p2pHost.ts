@@ -22,6 +22,8 @@ interface Conn {
   info: SpeakerInfo;
   /** tracks whose bytes this speaker already has */
   sent: Set<string>;
+  /** last time we pushed a repair snapshot to this speaker */
+  lastRepair: number;
 }
 
 const STORE = 'sync-music.p2phost';
@@ -31,7 +33,8 @@ export class P2PHostClient {
   private conns = new Map<string, Conn>();
   private files = new Map<string, { track: AudioTrack; bytes: ArrayBuffer; mime: string }>();
   private timers: number[] = [];
-  private seq = 0;
+  private seq = 0;           // ids for uploaded tracks
+  private cmdSeq = 0;        // monotonic transport command counter
   private roomId = '';
 
   state: HostState = {
@@ -122,7 +125,7 @@ export class P2PHostClient {
         id: conn.peer, name: `Speaker ${n}`, group: 'ALL', status: 'connected', muted: false,
         latencyMs: 0, driftMs: 0, state: 'idle', bufferedSeconds: 0, joinedAt: Date.now(), lastSeen: Date.now(),
       };
-      this.conns.set(conn.peer, { conn, info, sent: new Set() });
+      this.conns.set(conn.peer, { conn, info, sent: new Set(), lastRepair: 0 });
       this.send(conn, {
         type: 'WELCOME', speakerId: conn.peer, name: info.name,
         sessionName: this.state.sessionName, hostTime: Date.now(),
@@ -187,6 +190,25 @@ export class P2PHostClient {
     }
   }
 
+  /** Full transport snapshot for one speaker (used to repair a laggard). */
+  private sendState(peerId: string) {
+    const c = this.conns.get(peerId);
+    if (!c) return;
+    const cur = this.transport.playlist[this.transport.trackIndex] ?? null;
+    const pending = this.transport.positionAtServerTime > Date.now();
+    const at = pending ? this.transport.positionAtServerTime : Date.now() + SYNC.APPLY_LEAD_MS;
+    this.send(c.conn, {
+      type: 'STATE',
+      seq: this.cmdSeq,
+      trackId: cur?.id ?? null,
+      title: cur?.title ?? '',
+      playing: this.transport.state === 'playing',
+      position: pending ? this.transport.position : this.livePosition(at),
+      atHostTime: at,
+      volume: this.transport.volume,
+    });
+  }
+
   private publishSpeakers() {
     const speakers = [...this.conns.values()].map((c) => c.info);
     const drift = speakers.filter((s) => s.state === 'playing');
@@ -229,7 +251,14 @@ export class P2PHostClient {
     } finally { this.set({ uploading: false }); }
   }
 
-  /** Ship the current track's bytes to one speaker (PeerJS chunks it for us). */
+  /**
+   * Ship the current track to one speaker in paced 64 kB chunks.
+   *
+   * Handing PeerJS one multi-megabyte buffer blocks that data channel for
+   * seconds: control messages queue up behind it and the phones that are still
+   * downloading stutter. Pacing against `bufferedAmount` keeps the channel
+   * responsive while the file streams.
+   */
   private async pushTrackTo(peerId: string) {
     const c = this.conns.get(peerId);
     const cur = this.transport.playlist[this.transport.trackIndex];
@@ -237,7 +266,33 @@ export class P2PHostClient {
     const f = this.files.get(cur.id);
     if (!f || c.sent.has(cur.id)) return;
     c.sent.add(cur.id);
-    this.send(c.conn, { type: 'TRACK', trackId: cur.id, title: cur.title, mime: f.mime, bytes: f.bytes });
+
+    const CHUNK = 64 * 1024;
+    const total = Math.ceil(f.bytes.byteLength / CHUNK);
+    this.send(c.conn, {
+      type: 'TRACK_META', trackId: cur.id, title: cur.title, mime: f.mime,
+      size: f.bytes.byteLength, chunks: total,
+    });
+
+    for (let i = 0; i < total; i++) {
+      if (!this.conns.has(peerId) || !c.conn.open) { c.sent.delete(cur.id); return; }
+      await this.waitForDrain(c.conn);
+      this.send(c.conn, {
+        type: 'TRACK_CHUNK', trackId: cur.id, index: i,
+        bytes: f.bytes.slice(i * CHUNK, Math.min((i + 1) * CHUNK, f.bytes.byteLength)),
+      });
+    }
+  }
+
+  /** Back-pressure: never let more than ~512 kB sit in the send queue. */
+  private waitForDrain(conn: DataConnection, limit = 512 * 1024) {
+    const dc: RTCDataChannel | undefined = (conn as any).dataChannel;
+    if (!dc || dc.bufferedAmount < limit) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const t = window.setInterval(() => {
+        if (!conn.open || dc.bufferedAmount < limit) { window.clearInterval(t); resolve(); }
+      }, 40);
+    });
   }
 
   setPlaylist(ids: string[]) {
@@ -291,7 +346,7 @@ export class P2PHostClient {
     this.pushTransport();
     // make sure everybody has the bytes before the scheduled moment
     this.conns.forEach((_c, p) => void this.pushTrackTo(p));
-    this.broadcast({ type: 'PLAY', trackId: track.id, position: pos, startAt });
+    this.broadcast({ type: 'PLAY', seq: ++this.cmdSeq, trackId: track.id, position: pos, startAt });
   }
 
   pause() {
@@ -299,7 +354,7 @@ export class P2PHostClient {
     const pos = this.livePosition();
     this.transport = { ...this.transport, state: 'paused', position: pos, positionAtServerTime: Date.now() };
     this.pushTransport();
-    this.broadcast({ type: 'PAUSE', position: pos });
+    this.broadcast({ type: 'PAUSE', seq: ++this.cmdSeq, position: pos });
   }
 
   toggle() { this.playing ? this.pause() : this.play(); }
@@ -307,7 +362,7 @@ export class P2PHostClient {
   stop() {
     this.transport = { ...this.transport, state: 'stopped', position: 0, positionAtServerTime: Date.now() };
     this.pushTransport();
-    this.broadcast({ type: 'STOP' });
+    this.broadcast({ type: 'STOP', seq: ++this.cmdSeq });
   }
 
   seek(position: number) {
@@ -316,7 +371,7 @@ export class P2PHostClient {
     const applyAt = Date.now() + SYNC.APPLY_LEAD_MS;
     this.transport = { ...this.transport, position, positionAtServerTime: applyAt };
     this.pushTransport();
-    this.broadcast({ type: 'SEEK', trackId: track.id, position, applyAt });
+    this.broadcast({ type: 'SEEK', seq: ++this.cmdSeq, trackId: track.id, position, applyAt });
   }
 
   next() { this.skip(1); }
@@ -331,7 +386,7 @@ export class P2PHostClient {
   volume(v: number) {
     this.transport = { ...this.transport, volume: v };
     this.pushTransport();
-    this.broadcast({ type: 'VOLUME', volume: v });
+    this.broadcast({ type: 'VOLUME', seq: ++this.cmdSeq, volume: v });
   }
 
   resync() {
@@ -341,7 +396,7 @@ export class P2PHostClient {
     const pending = this.transport.positionAtServerTime > Date.now();
     const at = pending ? this.transport.positionAtServerTime : Date.now() + SYNC.APPLY_LEAD_MS;
     this.broadcast({
-      type: 'RESYNC', trackId: track.id,
+      type: 'RESYNC', seq: ++this.cmdSeq, trackId: track.id,
       position: pending ? this.transport.position : this.livePosition(at), atHostTime: at, playing,
     });
   }
@@ -352,11 +407,11 @@ export class P2PHostClient {
     const pending = this.transport.positionAtServerTime > Date.now();
     const at = pending ? this.transport.positionAtServerTime : Date.now() + SYNC.APPLY_LEAD_MS;
     this.send(c.conn, {
-      type: 'RESYNC', trackId: track.id,
+      type: 'RESYNC', seq: this.cmdSeq, trackId: track.id,
       position: pending ? this.transport.position : this.livePosition(at),
       atHostTime: at, playing: this.transport.state === 'playing',
     });
-    this.send(c.conn, { type: 'VOLUME', volume: this.transport.volume });
+    this.send(c.conn, { type: 'VOLUME', seq: this.cmdSeq, volume: this.transport.volume });
   }
 
   autoNext(enabled: boolean) { this.transport = { ...this.transport, autoNext: enabled }; this.pushTransport(); }
@@ -387,7 +442,7 @@ export class P2PHostClient {
   attach() { /* nothing to re-attach to in direct mode */ }
 
   async end() {
-    this.broadcast({ type: 'STOP' });
+    this.broadcast({ type: 'STOP', seq: ++this.cmdSeq });
     this.conns.forEach((c) => { try { c.conn.close(); } catch {} });
     this.conns.clear();
     try { this.peer?.destroy(); } catch {}

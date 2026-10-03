@@ -23,8 +23,13 @@ export class P2PSpeakerClient {
   private transportPlaying = false;
   private basePosition = 0;
   private baseHostTime = 0;
-  private trackId: string | null = null;
+  private trackId: string | null = null;      // track we are playing
+  private haveTrack: string | null = null;    // track whose bytes we hold
   private objectUrl: string | null = null;
+  /** last transport command applied — reported back so the host can repair us */
+  private appliedSeq = 0;
+  /** in-flight chunked download */
+  private incoming: { trackId: string; title: string; mime: string; chunks: number; parts: (ArrayBuffer | undefined)[]; got: number } | null = null;
   private timers: number[] = [];
   private playTimer: number | null = null;
   /** last clock offset we aligned playback against */
@@ -152,18 +157,52 @@ export class P2PSpeakerClient {
         this.send({ type: 'PONG', t1: m.t1, t2: Date.now(), t3: Date.now() });
         break;
 
-      case 'TRACK': {
+      case 'TRACK_META':
+        this.incoming = {
+          trackId: m.trackId, title: m.title, mime: m.mime, chunks: m.chunks,
+          parts: new Array(m.chunks), got: 0,
+        };
+        this.set({ trackTitle: m.title, info: m.chunks > 8 ? 'Receiving the track…' : null });
+        break;
+
+      case 'TRACK_CHUNK': {
+        const inc = this.incoming;
+        if (!inc || inc.trackId !== m.trackId || inc.parts[m.index]) break;
+        inc.parts[m.index] = m.bytes;
+        inc.got++;
+        this.set({ bufferedPct: Math.round((inc.got / inc.chunks) * 100) });
+        if (inc.got < inc.chunks) break;
+
         if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
-        const blob = new Blob([m.bytes], { type: m.mime || 'audio/mpeg' });
+        const blob = new Blob(inc.parts as ArrayBuffer[], { type: inc.mime || 'audio/mpeg' });
         this.objectUrl = URL.createObjectURL(blob);
-        this.trackId = m.trackId;
-        this.set({ trackTitle: m.title, trackArtist: '', info: null });
+        this.trackId = inc.trackId;
+        this.haveTrack = inc.trackId;
+        this.incoming = null;
+        this.set({ trackTitle: inc.title, trackArtist: '', info: null });
         if (this.audioEnabled) this.loadAudio();
-        this.send({ type: 'TRACK_READY', trackId: m.trackId });
+        this.send({ type: 'TRACK_READY', trackId: this.trackId });
+        // we may have been told to play while the file was still arriving
+        if (this.transportPlaying) this.catchUp();
+        break;
+      }
+
+      case 'STATE': {
+        // full repair snapshot from the host
+        this.appliedSeq = Math.max(this.appliedSeq, m.seq);
+        this.transportPlaying = m.playing;
+        this.basePosition = m.position;
+        this.baseHostTime = m.atHostTime;
+        this.set({ playing: m.playing, volume: m.volume, trackTitle: m.title || this.state.trackTitle });
+        this.applyVolume();
+        if (!this.audioEnabled) break;
+        if (m.playing) this.catchUp();
+        else { this.audio?.pause(); try { if (this.audio) this.audio.currentTime = m.position; } catch {} }
         break;
       }
 
       case 'PLAY':
+        this.appliedSeq = Math.max(this.appliedSeq, m.seq);
         this.transportPlaying = true;
         this.basePosition = m.position;
         this.baseHostTime = m.startAt;
@@ -174,6 +213,7 @@ export class P2PSpeakerClient {
         break;
 
       case 'PAUSE': {
+        this.appliedSeq = Math.max(this.appliedSeq, m.seq);
         this.transportPlaying = false;
         this.basePosition = m.position;
         this.baseHostTime = this.clock.now();
@@ -185,6 +225,7 @@ export class P2PSpeakerClient {
       }
 
       case 'STOP':
+        this.appliedSeq = Math.max(this.appliedSeq, m.seq);
         this.transportPlaying = false;
         this.basePosition = 0;
         if (this.playTimer) window.clearTimeout(this.playTimer);
@@ -193,6 +234,7 @@ export class P2PSpeakerClient {
         break;
 
       case 'SEEK': {
+        this.appliedSeq = Math.max(this.appliedSeq, m.seq);
         this.basePosition = m.position;
         this.baseHostTime = m.applyAt;
         const wait = Math.max(0, m.applyAt - this.clock.now());
@@ -206,6 +248,7 @@ export class P2PSpeakerClient {
       }
 
       case 'RESYNC':
+        this.appliedSeq = Math.max(this.appliedSeq, m.seq);
         this.transportPlaying = m.playing;
         this.basePosition = m.position;
         this.baseHostTime = m.atHostTime;
@@ -215,6 +258,7 @@ export class P2PSpeakerClient {
         break;
 
       case 'VOLUME':
+        this.appliedSeq = Math.max(this.appliedSeq, m.seq);
         this.set({ volume: m.volume });
         this.applyVolume();
         break;
@@ -352,6 +396,7 @@ export class P2PSpeakerClient {
         rate: a?.playbackRate ?? 1, playing: !!a && !a.paused, buffered: Math.max(0, buffered),
         clockRtt: Math.round(this.clock.rtt), clockSynced: this.clock.synced,
         clockSamples: this.clock.sampleCount,
+        seq: this.appliedSeq, haveTrack: this.haveTrack,
       });
       this.timers.push(window.setTimeout(report, 600));
     };

@@ -21,22 +21,36 @@ export type P2PMessage =
   | { type: 'PING'; t1: number }
   | { type: 'PONG'; t1: number; t2: number; t3: number }
   // media ----------------------------------------------------------------
-  | { type: 'TRACK'; trackId: string; title: string; mime: string; bytes: ArrayBuffer }
+  // The file is sent in paced chunks. One huge send blocks the data channel
+  // for seconds, which starves the control messages and makes playback
+  // stutter on the phones that are still receiving.
+  | { type: 'TRACK_META'; trackId: string; title: string; mime: string; size: number; chunks: number }
+  | { type: 'TRACK_CHUNK'; trackId: string; index: number; bytes: ArrayBuffer }
   | { type: 'TRACK_READY'; trackId: string }
   // transport (all timestamps are HOST-clock epoch ms) --------------------
-  | { type: 'PLAY'; trackId: string; position: number; startAt: number }
-  | { type: 'PAUSE'; position: number }
-  | { type: 'STOP' }
-  | { type: 'SEEK'; trackId: string; position: number; applyAt: number }
-  | { type: 'RESYNC'; trackId: string; position: number; atHostTime: number; playing: boolean }
-  | { type: 'VOLUME'; volume: number }
+  // Every transport change carries a monotonic `seq`. Speakers report the last
+  // one they applied, so the host can tell who missed a command and re-send
+  // the full state to exactly that phone — nothing is silently lost any more.
+  | { type: 'PLAY'; seq: number; trackId: string; position: number; startAt: number }
+  | { type: 'PAUSE'; seq: number; position: number }
+  | { type: 'STOP'; seq: number }
+  | { type: 'SEEK'; seq: number; trackId: string; position: number; applyAt: number }
+  | { type: 'RESYNC'; seq: number; trackId: string; position: number; atHostTime: number; playing: boolean }
+  | { type: 'VOLUME'; seq: number; volume: number }
   | { type: 'RENAME'; name: string }
+  /** full snapshot used to repair a speaker that fell behind */
+  | {
+      type: 'STATE'; seq: number; trackId: string | null; title: string; playing: boolean;
+      position: number; atHostTime: number; volume: number;
+    }
   // telemetry ------------------------------------------------------------
   | {
       type: 'STATUS'; position: number; atHostTime: number; rate: number; playing: boolean;
       buffered: number;
       /** our current clock-sync quality, so the host knows if we are ready */
       clockRtt: number; clockSynced: boolean; clockSamples: number;
+      /** last transport seq we applied, and the track we actually hold */
+      seq: number; haveTrack: string | null;
     };
 
 /** Peer ids are namespaced so a random PeerJS id can never collide with ours. */

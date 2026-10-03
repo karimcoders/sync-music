@@ -67,6 +67,25 @@ when no direct path exists. That costs a little extra latency but it connects.
 If a speaker still cannot reach the host after ~12 s it now says so instead of
 spinning forever; putting both phones on the same Wi-Fi or hotspot always works.
 
+### Why it used to stutter, and why one phone stopped obeying
+
+Two real bugs, both fixed:
+
+* The track was handed to PeerJS as **one huge buffer**. That blocks the data
+  channel for seconds, so control messages queued up behind the file and the
+  audio stuttered. It is now streamed in **64 kB chunks paced against
+  `bufferedAmount`**, which keeps the channel responsive while a file is being
+  delivered.
+* A message lost on one channel was lost **forever** — that is why only the
+  phone that joined last seemed to react to pause/next. Every transport command
+  now carries a monotonic `seq`; each speaker reports the last `seq` it applied
+  and which track it actually holds, and the host **repairs anyone who is
+  behind** with a full state snapshot (and re-sends the track if needed).
+
+Measured after the fix, direct mode on one machine: 0.7 ms apart at start,
+1.9 ms after six seconds, and a phone that joins mid-song lands 9.1 ms from the
+others. A second pause reaches every phone, including the first one.
+
 ### Joining
 
 Three ways, all equivalent: open the **link**, **scan the QR code** with the
