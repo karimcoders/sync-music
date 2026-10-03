@@ -37,11 +37,15 @@ export type P2PMessage =
 /** Peer ids are namespaced so a random PeerJS id can never collide with ours. */
 export const PEER_PREFIX = 'syncmusic-';
 
-export function newRoomId(): string {
+/** Human-typeable code (no 0/O/1/I), also used as the PeerJS room id. */
+export function newRoomCode(): string {
+  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
   const a = new Uint8Array(6);
   crypto.getRandomValues(a);
-  return PEER_PREFIX + Array.from(a, (b) => b.toString(36).padStart(2, '0')).join('').slice(0, 10);
+  return Array.from(a, (b) => alphabet[b % alphabet.length]).join('');
 }
+export const roomIdFromCode = (code: string) => PEER_PREFIX + code.trim().toLowerCase();
+export const codeFromRoomId = (id: string) => id.replace(PEER_PREFIX, '');
 
 /** Public, free, account-less PeerJS broker. It only brokers the connection. */
 export const PEER_OPTIONS = { debug: 0 as const };

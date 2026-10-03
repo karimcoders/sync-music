@@ -467,6 +467,24 @@ export class SessionHub {
     return true;
   }
 
+  /**
+   * How far ahead to schedule a start.
+   *
+   * A fixed 1.5 s is wasteful on a good Wi-Fi and too short on a bad mobile
+   * link, so the lead follows the speakers we actually have: the slowest
+   * one-way latency plus a safety margin, clamped to a sane range. On a LAN
+   * this gives ~0.5 s (playback feels instant); on a slow network it grows
+   * automatically instead of starting phones out of step.
+   */
+  private playLead(sessionId: string, needsDownload: boolean) {
+    const ls = this.local.get(sessionId);
+    const speakers = ls ? [...ls.speakers.values()] : [];
+    const worst = speakers.reduce((a, s) => Math.max(a, s.latencyMs || 0), 0);
+    // a phone that has never buffered this track needs time to fetch it
+    const base = needsDownload ? 1200 : 350;
+    return Math.round(Math.min(SYNC.PLAY_LEAD_MS * 2, Math.max(450, base + worst * 3)));
+  }
+
   async play(sessionId: string, audioId?: string, position?: number) {
     const ls = this.local.get(sessionId); if (!ls) return;
     const t = ls.rec.transport;
@@ -474,15 +492,24 @@ export class SessionHub {
     if (!id) return;
     const idx = t.playlist.findIndex((p) => p.id === id);
     const pos = position ?? (t.trackId === id ? this.serverPosition(sessionId) : 0);
-    const startAt = Date.now() + SYNC.PLAY_LEAD_MS;
+    const ls2 = this.local.get(sessionId);
+    const fresh = t.trackId !== id || [...(ls2?.speakers.values() ?? [])].some((s) => s.bufferedSeconds <= 0);
+    const startAt = Date.now() + this.playLead(sessionId, fresh);
     await this.mutateTransport(sessionId, {
       state: 'playing', trackId: id, trackIndex: idx, position: pos, positionAtServerTime: startAt,
     });
     await this.fanout(sessionId, { type: 'SYNC_PLAY', audioId: id, position: pos, startAt, volume: t.volume });
   }
 
+  /** Seek/pause need far less head start than a cold start — just the network. */
+  private applyLead(sessionId: string) {
+    const ls = this.local.get(sessionId);
+    const worst = ls ? [...ls.speakers.values()].reduce((a, s) => Math.max(a, s.latencyMs || 0), 0) : 0;
+    return Math.round(Math.min(SYNC.APPLY_LEAD_MS, Math.max(120, 80 + worst * 2.5)));
+  }
+
   async pause(sessionId: string) {
-    const applyAt = Date.now() + SYNC.APPLY_LEAD_MS;
+    const applyAt = Date.now() + this.applyLead(sessionId);
     const pos = this.serverPosition(sessionId, applyAt);
     await this.mutateTransport(sessionId, { state: 'paused', position: pos, positionAtServerTime: applyAt });
     await this.fanout(sessionId, { type: 'PAUSE', position: pos, applyAt });
@@ -495,7 +522,7 @@ export class SessionHub {
 
   async seek(sessionId: string, position: number) {
     const t = this.transport(sessionId);
-    const applyAt = Date.now() + SYNC.APPLY_LEAD_MS;
+    const applyAt = Date.now() + this.applyLead(sessionId);
     const playing = t.state === 'playing';
     await this.mutateTransport(sessionId, { position, positionAtServerTime: applyAt });
     await this.fanout(sessionId, { type: 'SEEK', position, applyAt, playing });

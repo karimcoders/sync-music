@@ -2,7 +2,7 @@ import Peer, { DataConnection } from 'peerjs';
 import { AudioTrack, SpeakerInfo, SYNC, TransportState } from '@sync-music/protocol';
 import { projectPosition } from '@sync-music/sync-engine';
 import type { HostState } from '../hostClient';
-import { P2PMessage, PEER_OPTIONS, newRoomId } from './messages';
+import { P2PMessage, PEER_OPTIONS, codeFromRoomId, newRoomCode, roomIdFromCode } from './messages';
 
 /**
  * Direct-mode host: this browser tab IS the server.
@@ -58,11 +58,14 @@ export class P2PHostClient {
   private set(p: Partial<HostState>) { this.state = { ...this.state, ...p }; this.onChange(this.state); }
   private pushTransport() { this.set({ transport: { ...this.transport } }); }
 
-  /** Link the speakers open. Carries the room id, so there is still no code to type. */
+  /** Link the speakers open — carries the room, so nothing has to be typed. */
   get speakerUrl() {
     const base = `${location.origin}${import.meta.env.BASE_URL.replace(/\/$/, '')}`;
-    return `${base}/#/speaker?h=${this.roomId}`;
+    return `${base}/#/speaker?h=${this.roomId}&go=1`;
   }
+
+  /** Short code for anyone who would rather type than open a link. */
+  get joinCode() { return codeFromRoomId(this.roomId).toUpperCase(); }
 
   get saved() { return null; } // a direct-mode room cannot outlive the tab
 
@@ -70,7 +73,7 @@ export class P2PHostClient {
 
   async createSession(name: string) {
     this.set({ busy: true, error: null, info: 'Opening a direct room…' });
-    this.roomId = newRoomId();
+    this.roomId = roomIdFromCode(newRoomCode());
     try {
       await this.openPeer(this.roomId);
       this.transport = { ...this.transport, state: 'idle', positionAtServerTime: Date.now() };
@@ -263,9 +266,13 @@ export class P2PHostClient {
     const pos = resume ? this.transport.position : position;
     // A WebRTC data channel needs a few seconds before its clock-offset
     // estimate is any good, so give phones that just joined more head start.
-    const youngest = Math.min(...[...this.conns.values()].map((c) => Date.now() - c.info.joinedAt), Infinity);
-    const extra = youngest < 8000 ? 2000 : 0;
-    const startAt = Date.now() + SYNC.PLAY_LEAD_MS + extra;
+    // Follow the speakers we really have instead of a fixed delay: a fresh
+    // data channel needs more head start, a settled one needs very little.
+    const cs = [...this.conns.values()];
+    const youngest = Math.min(...cs.map((c) => Date.now() - c.info.joinedAt), Infinity);
+    const worst = cs.reduce((a, c) => Math.max(a, this.latency.get(c.conn.peer) ?? 120), 0);
+    const lead = youngest < 8000 ? 2600 : Math.min(2000, Math.max(500, 350 + worst * 3));
+    const startAt = Date.now() + lead;
 
     this.transport = {
       ...this.transport, state: 'playing', trackIndex: idx, trackId: track.id,

@@ -3,6 +3,7 @@ import { HostClient, type HostState } from '../lib/hostClient';
 import { P2PHostClient } from '../lib/p2p/p2pHost';
 import { detectMode, type Mode } from '../lib/mode';
 import { backendOrigin } from '../lib/backend';
+import JoinCard from '../components/JoinCard';
 import { Button, Card, Equalizer, Field, Logo, Meter, Row, Shell, Stack, Status, fmtTime } from '../ui';
 
 type AnyHost = HostClient | P2PHostClient;
@@ -36,7 +37,10 @@ export default function Host({ go }: { go: (p: string) => void }) {
   const c = ref.current;
   const link = c instanceof P2PHostClient
     ? c.speakerUrl
-    : `${location.origin}${import.meta.env.BASE_URL}speaker`;
+    : `${location.origin}${import.meta.env.BASE_URL}speaker?s=${s?.sessionId ?? ''}&go=1`;
+  const joinCode = c instanceof P2PHostClient
+    ? c.joinCode
+    : (s?.sessionId ? s.sessionId.slice(0, 6).toUpperCase() : undefined);
   const track = c?.track ?? null;
   const dur = track?.duration ?? 0;
   const pos = seekPreview ?? s?.position ?? 0;
@@ -108,17 +112,10 @@ export default function Host({ go }: { go: (p: string) => void }) {
           <Equalizer active={!!c?.playing} />
         </Row>
         <div className="tiny">No maximum — add as many phones as your network and server can carry.</div>
-        <div style={{ height: 14 }} />
-        <div className="kicker">Speaker link — share it any way you like</div>
-        <Row style={{ marginTop: 6 }}>
-          <a href={link} target="_blank" rel="noreferrer">{link}</a>
-          <button
-            className="icon-btn"
-            onClick={() => { navigator.clipboard?.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
-          >{copied ? 'Copied' : 'Copy'}</button>
-        </Row>
         {backendOrigin && <div className="tiny" style={{ marginTop: 6 }}>Server: {backendOrigin}</div>}
       </Card>
+
+      <JoinCard link={link} code={joinCode} />
 
       <Card>
         <div className="kicker">Now playing</div>

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { SpeakerClient, type UiState } from '../lib/client';
 import { P2PSpeakerClient } from '../lib/p2p/p2pSpeaker';
 import { roomParam } from '../lib/mode';
+import { roomIdFromCode } from '../lib/p2p/messages';
 import { backendOrigin, setBackend } from '../lib/backend';
 import { Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime } from '../ui';
 
@@ -14,6 +15,8 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
   const [failed, setFailed] = useState(false);
   const ref = useRef<SpeakerClient | P2PSpeakerClient | null>(null);
   const room = roomParam();
+  const wanted = urlParam('s');          // session id straight from the host's link
+  const [code, setCode] = useState('');  // typed join code
 
   useEffect(() => {
     // A link that carries ?h=<room> means the host has no backend and is
@@ -28,7 +31,11 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
     const look = async () => {
       if (stopped) return;
       try {
-        setSessions((await c.autoConnect()) as Discovered[]);
+        const found = (await c.autoConnect()) as Discovered[];
+        // The link can name the session, so there is nothing to choose.
+        const target = wanted && found.find((f) => f.sessionId === wanted);
+        if (target) { (c as SpeakerClient).connect(target.sessionId); setSessions([]); }
+        else setSessions(found);
         setFailed(false);
       } catch { setFailed(true); }
       setSearching(false);
@@ -81,6 +88,18 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
               </Card>
             ))}
             {s.error && <div className="err-text">{s.error}</div>}
+
+            <div className="divider"><span>or enter the code the host shows</span></div>
+            <Row>
+              <input
+                className="code-input" data-testid="join-code-input" inputMode="text" autoCapitalize="characters"
+                maxLength={8} placeholder="ABC123" value={code}
+                onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+              />
+              <Button testId="join-by-code" disabled={code.length < 4} onClick={() => joinByCode(code, sessions, c)}>
+                JOIN
+              </Button>
+            </Row>
           </Stack>
         </Card>
         {!room && <BackendSetting promote={failed} />}
@@ -107,17 +126,19 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
       </Card>
 
       {!enabled && (
-        <Card>
-          <Stack gap={12} style={{ textAlign: 'center' }}>
-            <div className="hero-emoji">🔈</div>
-            <h2>One tap to become a speaker</h2>
-            <p className="tiny" style={{ margin: 0 }}>
-              Android only lets a web page play sound after you touch it. That is a browser
-              security rule — we don’t try to work around it.
-            </p>
-            <Button testId="enable-speaker" onClick={() => c?.enableSpeaker()}>ENABLE SPEAKER</Button>
-          </Stack>
-        </Card>
+        <button className="tap-overlay" data-testid="enable-speaker" onClick={() => c?.enableSpeaker()}>
+          <span className="tap-ring">🔈</span>
+          <span className="tap-title">Tap anywhere to start</span>
+          <span className="tap-sub">
+            {s.playing
+              ? 'Music is already playing — you will join it in sync.'
+              : 'You will start the moment the host presses play.'}
+          </span>
+          <span className="tap-note">
+            Android only lets a web page play sound after a tap. That is a browser security
+            rule — we don’t work around it.
+          </span>
+        </button>
       )}
 
       {enabled && (
@@ -195,4 +216,23 @@ function BackendSetting({ promote }: { promote: boolean }) {
       </Stack>
     </Card>
   );
+}
+
+
+function urlParam(name: string): string | null {
+  const hashQuery = location.hash.includes('?') ? location.hash.slice(location.hash.indexOf('?') + 1) : '';
+  return new URLSearchParams(location.search).get(name) ?? new URLSearchParams(hashQuery).get(name);
+}
+
+/**
+ * Join from a typed code. In server mode the code is the first characters of
+ * the session id; in direct mode it IS the room, so we just reload into it.
+ */
+function joinByCode(code: string, sessions: Discovered[], c: SpeakerClient | P2PSpeakerClient | null) {
+  const lower = code.trim().toLowerCase();
+  const match = sessions.find((x) => x.sessionId.toLowerCase().startsWith(lower));
+  if (match && c instanceof SpeakerClient) { c.connect(match.sessionId); return; }
+  const base = `${location.origin}${import.meta.env.BASE_URL.replace(/\/$/, '')}`;
+  location.href = `${base}/#/speaker?h=${roomIdFromCode(lower)}&go=1`;
+  location.reload();
 }
