@@ -33,6 +33,7 @@ export interface UiState {
 
 const DEVICE_KEY = 'sync-music.deviceId';
 const TOKEN_KEY = 'sync-music.speakerToken';
+const LAST_SESSION_KEY = 'sync-music.lastSession';
 
 function deviceId(): string {
   let v = localStorage.getItem(DEVICE_KEY);
@@ -102,6 +103,7 @@ export class SpeakerClient {
 
   connect(sessionId: string) {
     this.closedByUs = false;
+    localStorage.setItem(LAST_SESSION_KEY, sessionId);
     this.set({ sessionId, conn: this.retry ? 'reconnecting' : 'connecting', phase: 'CONNECTING', error: null });
     let ws: WebSocket;
     try { ws = new WebSocket(wsUrl()); } catch { return this.scheduleReconnect(); }
@@ -163,7 +165,12 @@ export class SpeakerClient {
     try {
       const { sessions, autoAttach } = await this.discover();
       this.set({ error: null });
-      if (autoAttach) this.connect(autoAttach);
+      // A refresh/crash should not cost the user a tap: if we were attached to
+      // a session that is still alive, rejoin it silently.
+      const last = localStorage.getItem(LAST_SESSION_KEY);
+      const stillThere = last && sessions.some((x: any) => x.sessionId === last) ? last : null;
+      if (stillThere) this.connect(stillThere);
+      else if (autoAttach) this.connect(autoAttach);
       return sessions;
     } catch (e) {
       this.set({ error: 'Unable to reach the server. Retrying…' });
@@ -439,9 +446,10 @@ export class SpeakerClient {
         break;
 
       case 'SESSION_ENDED':
-        this.set({ info: 'Host session ended.', playing: false, phase: 'DISCONNECTED' });
+        this.set({ info: 'Host session ended.', playing: false, phase: 'DISCONNECTED', sessionId: null });
         this.audio?.pause();
         localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(LAST_SESSION_KEY);
         this.closedByUs = true;
         try { this.ws?.close(); } catch {}
         break;
@@ -449,6 +457,7 @@ export class SpeakerClient {
       case 'ERROR':
         if (msg.code === 'SESSION_NOT_FOUND') {
           localStorage.removeItem(TOKEN_KEY);
+          localStorage.removeItem(LAST_SESSION_KEY);
           this.set({ sessionId: null, error: msg.message, phase: 'DISCONNECTED' });
         } else {
           this.set({ error: msg.message });
@@ -478,7 +487,18 @@ export class SpeakerClient {
         const err = startAt - this.clock.now(); // residual ms (usually < 10)
         try { a.currentTime = position - Math.min(0, err) / 1000; } catch {}
         void a.play()
-          .then(() => this.set({ phase: 'PLAYING', playing: true }))
+          .then(() => {
+            this.set({ phase: 'PLAYING', playing: true });
+            // Slow decoders can begin hundreds of ms late. Measure once, 400 ms
+            // in, and snap if we are clearly off; the drift loop handles the rest.
+            window.setTimeout(() => {
+              if (!this.transportPlaying || a.paused) return;
+              const target = this.targetPosition();
+              if (Math.abs(a.currentTime - target) > 0.12) {
+                try { a.currentTime = target; } catch {}
+              }
+            }, 400);
+          })
           .catch(() => this.set({ phase: 'AUDIO_DISABLED', error: 'Your browser blocked audio. Tap Enable Speaker.' }));
       }, Math.max(0, lead - 5));
     };

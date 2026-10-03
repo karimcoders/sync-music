@@ -24,13 +24,14 @@ const host = await hostCtx.newPage();
 host.on('console', (m) => m.type() === 'error' && log('  host console error:', m.text()));
 host.on('pageerror', (e) => fail('host page error: ' + e.message));
 await host.goto(`${base}/host`, { waitUntil: 'domcontentloaded' });
-await host.fill('#name', 'E2E Session');
-await host.click('#create');
-await host.waitForSelector('#live:not([hidden])', { timeout: 15000 });
-log('✓ host created session:', await host.textContent('#sname'));
+await host.fill('input[type=text]', 'E2E Session');
+await host.click('[data-testid=create-session]');
+await host.waitForSelector('[data-testid=speaker-count]', { timeout: 20000 });
+log('✓ host created session');
 
-await host.setInputFiles('#file', '/tmp/tone.wav');
-await host.waitForFunction(() => document.querySelectorAll('#list .item').length > 0, null, { timeout: 30000 });
+await host.setInputFiles('[data-testid=file]', '/tmp/tone.wav');
+await host.waitForFunction(
+  () => document.querySelectorAll('[data-testid=playlist] .list-item').length > 0, null, { timeout: 30000 });
 log('✓ track uploaded and in playlist');
 
 /* ------------------------------ speakers -------------------------------- */
@@ -42,22 +43,23 @@ for (let i = 0; i < N; i++) {
   await p.goto(`${base}/speaker`, { waitUntil: 'domcontentloaded' });
   // auto-attach happens when exactly one host session exists; otherwise the
   // page lists the available hosts and we pick ours.
-  await p.waitForSelector('[data-testid=connect-host], button:has-text("ENABLE SPEAKER")', { timeout: 25000 });
+  await p.waitForSelector('[data-testid=connect-host], [data-testid=enable-speaker]', { timeout: 25000 });
   const connect = p.locator('[data-testid=connect-host]');
   if (await connect.count()) await connect.first().click();
-  await p.waitForSelector('button:has-text("ENABLE SPEAKER")', { timeout: 25000 });
-  await p.click('button:has-text("ENABLE SPEAKER")');
+  await p.waitForSelector('[data-testid=enable-speaker]', { timeout: 25000 });
+  await p.click('[data-testid=enable-speaker]');
   await p.waitForFunction(() => !!window.__syncAudio, null, { timeout: 10000 });
   speakers.push(p);
   log(`✓ speaker ${i + 1} connected and audio enabled`);
 }
 
-await host.waitForFunction((n) => Number(document.getElementById('count').textContent) >= n, N, { timeout: 20000 })
+await host.waitForFunction(
+  (n) => Number(document.querySelector('[data-testid=speaker-count]')?.textContent) >= n, N, { timeout: 25000 })
   .then(() => log(`✓ host shows Connected Speakers: ${N}`))
-  .catch(() => fail(`host never showed ${N} speakers (saw ${host.textContent('#count')})`));
+  .catch(() => fail(`host never showed ${N} speakers`));
 
 /* -------------------------------- play ---------------------------------- */
-await host.click('#play');
+await host.click('[data-testid=play]');
 log('→ PLAY sent, waiting for the scheduled start…');
 await new Promise((r) => setTimeout(r, 3500));
 
@@ -85,7 +87,7 @@ log(`✓ inter-speaker spread after 6 s: ${(spread2 * 1000).toFixed(1)} ms`);
 if (spread2 > 0.25) fail(`drift grew beyond 250 ms (${(spread2 * 1000).toFixed(0)} ms)`);
 
 /* ------------------------------- pause ---------------------------------- */
-await host.click('#play'); // now PAUSE
+await host.click('[data-testid=play]'); // now PAUSE
 await new Promise((r) => setTimeout(r, 1500));
 const paused = await Promise.all(speakers.map(probe));
 if (paused.some((s) => !s.paused)) fail('a speaker kept playing after PAUSE');
@@ -93,10 +95,11 @@ else log('✓ PAUSE stopped every speaker');
 
 /* -------------------------- reconnect behaviour -------------------------- */
 await speakers[0].reload();
-await speakers[0].waitForSelector('text=Speaker', { timeout: 20000 });
+await speakers[0].waitForSelector('[data-testid=enable-speaker]', { timeout: 25000 });
+await speakers[0].click('[data-testid=enable-speaker]'); // re-arm audio after a reload (gesture required)
 log('✓ speaker 1 survived a browser refresh and re-attached');
 
-await host.click('#play');
+await host.click('[data-testid=play]');
 await new Promise((r) => setTimeout(r, 3500));
 const after = await probe(speakers[N - 1]);
 if (!after || after.paused || after.t <= 0.05) fail('resume after pause did not play');

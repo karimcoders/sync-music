@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/main.tsx","./src/vite-env.d.ts","./src/lib/backend.ts","./src/lib/client.ts"],"version":"5.9.3"}
+{"root":["./src/App.tsx","./src/main.tsx","./src/ui.tsx","./src/vite-env.d.ts","./src/lib/backend.ts","./src/lib/client.ts","./src/lib/hostClient.ts","./src/pages/Home.tsx","./src/pages/Host.tsx","./src/pages/Speaker.tsx"],"version":"5.9.3"}

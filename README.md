@@ -1,6 +1,8 @@
 # Sync Music — 1 Host Android app → N browser speaker phones
 
-**Live speaker page:** https://karimcoders.github.io/sync-music/ ·
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/karimcoders/sync-music)
+
+**Live web app (permanent):** https://karimcoders.github.io/sync-music/ ·
 **Backend image:** `ghcr.io/karimcoders/sync-music:latest` ·
 see [`docs/DEPLOY-github.md`](docs/DEPLOY-github.md) — the static page is live, the
 backend still has to run on a server (Pages cannot host WebSockets).
