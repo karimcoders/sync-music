@@ -315,3 +315,46 @@ command.
 The UI itself was redesigned around this: a single hero on Home, large
 app-style titles, one white-on-black action per screen, and the bottom tab bar
 for the three places you actually go.
+
+## The stutter: why it was there and what replaced the player
+
+Every measurement said the phones were together, and listeners still heard the
+music catch and hiccup. The spread figure was measuring the wrong thing — the
+problem was not *where* the phones were on the timeline but *how* the audio was
+being produced.
+
+An `<audio>` element is the wrong instrument for this job:
+
+* the browser owns its buffering and can stall for tens of milliseconds when
+  the decoder or the Wi-Fi radio hiccups;
+* `play()` starts "soon", not at a stated instant, so every start was a guess;
+* every `currentTime` write is a real seek — audible, and we were doing them to
+  correct drift, i.e. the fix was producing the symptom;
+* `playbackRate` nudges of ±2 % are a hearable pitch wobble.
+
+So a complete track is now **decoded once into memory and played through Web
+Audio** (`apps/speaker-web/src/lib/p2p/bufferPlayer.ts`):
+
+* starts are scheduled on the audio hardware's own clock — sample-accurate,
+  no `setTimeout`, no `play()` latency;
+* nothing re-buffers mid-song, because there is nothing left to fetch;
+* corrections above ~30 ms are an exact reschedule with a 6 ms fade in and out
+  (no click); below that, an inaudible 0.3 % rate ramp;
+* positions are reported in **audible** time: `AudioContext.outputLatency` is
+  subtracted, so phones with different hardware buffers line up on what you
+  hear rather than on what was queued.
+
+The `<audio>` element is still there as a fallback for a format the browser
+cannot decode and for a track that is still arriving, and the speaker switches
+over seamlessly the moment the decode finishes.
+
+Measured after the change (`tools/p2p-e2e.mjs`, 3 speakers): every speaker on
+the decoded engine, **worst gap between played time and real time over 8 s:
+25 ms** (this is the new stutter check — it samples playback against the wall
+clock and fails on a stall), start spread 14 ms, and all previous checks
+unchanged.
+
+Honest limits: decoding holds the song as PCM, roughly 10 MB per minute, so a
+very long track on a very old phone can be refused — that phone falls back to
+the element. And no browser gives us the true speaker-to-air delay, so the
+per-phone nudge in Settings is still the last word if one phone echoes.

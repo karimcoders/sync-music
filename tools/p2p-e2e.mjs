@@ -81,6 +81,36 @@ const probe = (p) => p.evaluate(() => {
   return a ? { t: a.currentTime, paused: a.paused, rate: a.playbackRate } : null;
 });
 
+{
+  const engines = await Promise.all(speakers.map((p) => p.evaluate(() => window.__syncAudio?.engine)));
+  console.log(`  playback engine: ${engines.join(', ')}`);
+  if (engines.every((e) => e === 'webaudio')) console.log('✓ every speaker is on the decoded, gap-free engine');
+  else console.log('! at least one speaker fell back to the <audio> element');
+}
+
+// Does the sound actually run smoothly? Sample one speaker for 8 s and look
+// for a step that is not ~the wall-clock time that passed: that is the
+// "ruk ruk" the listener hears, and it never showed up in a spread figure.
+{
+  const samples = await speakers[0].evaluate(async () => {
+    const out = [];
+    for (let i = 0; i < 40; i++) {
+      out.push([performance.now(), window.__syncAudio?.currentTime ?? 0]);
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return out;
+  });
+  let worst = 0;
+  for (let i = 1; i < samples.length; i++) {
+    const wall = (samples[i][0] - samples[i - 1][0]) / 1000;
+    const played = samples[i][1] - samples[i - 1][1];
+    worst = Math.max(worst, Math.abs(played - wall) * 1000);
+  }
+  console.log(`  worst gap between played time and real time over 8 s: ${worst.toFixed(1)} ms`);
+  if (worst < 60) console.log(`✓ no stutter: playback tracked real time within ${worst.toFixed(0)} ms`);
+  else fail(`playback stalled or jumped by ${worst.toFixed(0)} ms`);
+}
+
 const dbg = async (p) => p.evaluate(() => window.__syncClient?.debug ?? null);
 const d0 = await Promise.all(speakers.map(dbg));
 d0.forEach((d, i) => d && console.log(`  speaker ${i + 1} clock: offset=${d.offset?.toFixed(1)}ms rtt=${d.rtt?.toFixed(1)}ms target=${d.target?.toFixed(3)}`));

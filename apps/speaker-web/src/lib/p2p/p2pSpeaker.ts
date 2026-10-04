@@ -1,5 +1,6 @@
 import Peer, { DataConnection } from 'peerjs';
 import { getTrack, putTrack, trackIds } from './speakerCache';
+import { WebAudioPlayer } from './bufferPlayer';
 
 import { ClockSync, DriftController, projectPosition } from '@sync-music/sync-engine';
 import { SILENT_WAV, type UiState } from '../client';
@@ -18,7 +19,22 @@ export class P2PSpeakerClient {
   private conn: DataConnection | null = null;
   private clock = new ClockSync();
   private drift = new DriftController();
-  private audio: HTMLAudioElement | null = null;
+  /**
+   * Two possible outputs, and we always prefer the first:
+   *
+   *  - `wa`: the decoded Web Audio player. Starts at an exact instant, never
+   *    re-buffers, corrects by ramping rate. This is what killed the stutter.
+   *  - `el`: a plain <audio> element, kept as the fallback for a format the
+   *    browser will not decode and for a track still arriving.
+   *
+   * `this.audio` hands back whichever is live, with the same small API.
+   */
+  private el: HTMLAudioElement | null = null;
+  private wa: WebAudioPlayer | null = null;
+  private ctx: AudioContext | null = null;
+  private blob: Blob | null = null;
+  private decoding = false;
+  private get audio(): any { return this.wa?.ready ? this.wa : this.el; }
   private audioEnabled = false;
 
   private transportPlaying = false;
@@ -220,6 +236,7 @@ export class P2PSpeakerClient {
   private adoptTrack(trackId: string, title: string, blob: Blob) {
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
     this.objectUrl = URL.createObjectURL(blob);
+    this.blob = blob;
     this.trackId = trackId;
     this.haveTrack = trackId;
     this.set({ trackTitle: title, trackArtist: '', info: null, bufferedPct: 100 });
@@ -463,22 +480,45 @@ export class P2PSpeakerClient {
   /* ------------------------------- audio -------------------------------- */
 
   async enableSpeaker(): Promise<boolean> {
-    if (!this.audio) {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
+    if (!this.el) {
       const a = new Audio();
       a.preload = 'auto';
       (a as any).playsInline = true;
       a.addEventListener('loadedmetadata', () => this.set({ duration: a.duration || 0 }));
       a.addEventListener('progress', () => this.updateBuffered());
-      this.audio = a;
-      (window as any).__syncAudio = a; // diagnostics / e2e only
+      this.el = a;
+      // Diagnostics / e2e only: a live view of whichever output is actually
+      // playing, so tools do not have to know which path we took.
+      (window as any).__syncAudio = {
+        get currentTime() { return self.audio?.currentTime ?? 0; },
+        get paused() { return self.audio ? self.audio.paused : true; },
+        get playbackRate() { return self.audio?.playbackRate ?? 1; },
+        get duration() { return self.audio?.duration ?? 0; },
+        get engine() { return self.wa?.ready ? 'webaudio' : 'element'; },
+        get element() { return self.el; },
+      };
     }
     try {
-      this.audio.muted = true;
-      this.audio.src = SILENT_WAV;
-      await this.audio.play();
-      this.audio.pause();
-      this.audio.currentTime = 0;
-      this.audio.muted = false;
+      this.el.muted = true;
+      this.el.src = SILENT_WAV;
+      await this.el.play();
+      this.el.pause();
+      this.el.currentTime = 0;
+      this.el.muted = false;
+      // An AudioContext must also be created and resumed inside the original
+      // tap — Android leaves a later one suspended, which would silently drop
+      // us back to the stuttering element path.
+      if (!this.ctx) {
+        const Ctor = (window as any).AudioContext || (window as any).webkitAudioContext;
+        if (Ctor) {
+          this.ctx = new Ctor({ latencyHint: 'playback' }) as AudioContext;
+          this.wa = new WebAudioPlayer(this.ctx);
+          (window as any).__syncWA = this.wa; // diagnostics / e2e only
+        }
+      }
+      if (this.ctx?.state === 'suspended') { try { await this.ctx.resume(); } catch {} }
       // Unlock a SECOND element in the same gesture: Android blocks a fresh
       // <audio> created later, which is why the host's live microphone was
       // silent on a real phone even though the track arrived.
@@ -508,22 +548,55 @@ export class P2PSpeakerClient {
   get isAudioEnabled() { return this.audioEnabled; }
 
   private loadAudio() {
-    const a = this.audio;
-    if (!a || !this.objectUrl || !this.trackId) return;
+    const el = this.el;
+    if (!el || !this.objectUrl || !this.trackId) return;
     // compare the actual source, not just the id: after a host refresh the id
     // is the same but the blob behind it is new
-    if (a.dataset.audioId === this.trackId && a.src === this.objectUrl) return;
-    a.src = this.objectUrl;
-    a.dataset.audioId = this.trackId;
-    a.load();
+    if (el.dataset.audioId !== this.trackId || el.src !== this.objectUrl) {
+      el.src = this.objectUrl;
+      el.dataset.audioId = this.trackId;
+      el.load();
+    }
+    this.decodeForExactPlayback();
     this.applyVolume();
   }
 
-  private applyVolume() { if (this.audio) this.audio.volume = this.state.muted ? 0 : this.state.volume; }
+  /**
+   * Decode the song into memory so playback can be scheduled exactly.
+   * Costs a second or two of CPU once; buys a song that never re-buffers.
+   */
+  private decodedId: string | null = null;
+  private decodeForExactPlayback() {
+    const blob = this.blob;
+    const id = this.trackId;
+    if (!this.wa || !blob || !id || this.decoding || this.decodedId === id) return;
+    this.decoding = true;
+    void this.wa.load(blob)
+      .then(() => {
+        this.decodedId = id;
+        this.set({ duration: this.wa?.duration || this.state.duration, bufferedPct: 100 });
+        // hand over from the element mid-song without a gap
+        if (this.transportPlaying && this.audioEnabled) {
+          try { this.el?.pause(); } catch {}
+          this.resyncExact();
+          this.set({ phase: 'PLAYING', playing: true });
+        }
+        this.applyVolume();
+      })
+      .catch(() => { /* undecodable format — the element fallback still works */ })
+      .finally(() => { this.decoding = false; });
+  }
+
+  private applyVolume() {
+    const v = this.state.muted ? 0 : this.state.volume;
+    if (this.el) this.el.volume = v;
+    if (this.wa) this.wa.volume = v;
+  }
 
   private updateBuffered() {
     const a = this.audio;
     if (!a || !a.duration) return;
+    if (this.wa?.ready) { this.set({ bufferedPct: 100 }); return; }
     const end = a.buffered.length ? a.buffered.end(a.buffered.length - 1) : 0;
     this.set({ bufferedPct: Math.min(100, (end / a.duration) * 100) });
   }
@@ -560,6 +633,7 @@ export class P2PSpeakerClient {
   private realign() {
     const a = this.audio;
     if (!a || !this.audioEnabled || !this.transportPlaying || a.paused) return;
+    if (this.wa?.ready) { this.resyncExact(); return; }
     const target = this.targetPosition();
     if (Math.abs(a.currentTime - target) < 0.03) return;
     try { a.currentTime = target; } catch {}
@@ -572,6 +646,16 @@ export class P2PSpeakerClient {
     if (!a) return;
     if (this.playTimer) window.clearTimeout(this.playTimer);
     this.set({ phase: 'SYNCING' });
+
+    // Decoded path: no setTimeout, no play() latency, no guessing. We hand the
+    // audio hardware the exact instant to begin and it obeys to the sample.
+    if (this.wa?.ready) {
+      const leadMs = startAt - this.clock.now() - this.outputOffsetMs;
+      this.wa.scheduleStart(position, leadMs / 1000);
+      this.set({ phase: 'PLAYING', playing: true });
+      this.drift.reset();
+      return;
+    }
 
     const arm = () => {
       const lead = startAt - this.clock.now();
@@ -611,6 +695,12 @@ export class P2PSpeakerClient {
     const untilStart = this.baseHostTime - this.clock.now();
     if (this.transportPlaying && untilStart > 20) { this.schedulePlay(this.basePosition, this.baseHostTime); return; }
     const target = this.targetPosition();
+    void target;
+    if (this.wa?.ready && this.transportPlaying) {
+      this.resyncExact();
+      this.set({ phase: 'PLAYING', playing: true });
+      return;
+    }
     try { a.currentTime = target; } catch {}
     if (this.transportPlaying) {
       void a.play()
@@ -679,7 +769,25 @@ export class P2PSpeakerClient {
       this.timers.push(window.setTimeout(report, 600));
     };
     report();
-    this.timers.push(window.setInterval(() => this.correctDrift(), 1000));
+    this.timers.push(window.setInterval(() => this.correctDrift(), 500));
+  }
+
+  /**
+   * Put the decoded player exactly on the timeline.
+   *
+   * With Web Audio this is cheap and precise — we simply tell the hardware to
+   * begin a fraction of a second from now at the position the song will have
+   * reached by then. Unlike an element seek there is no re-buffering, so it is
+   * the right tool for anything above a few tens of milliseconds.
+   */
+  private resyncExact() {
+    const wa = this.wa;
+    if (!wa?.ready || !this.transportPlaying) return;
+    const lead = 0.06;
+    wa.playbackRate = 1;
+    wa.scheduleStart(this.targetPosition() + lead, lead);
+    this.drift.reset();
+    this.bigErrors = 0;
   }
 
   private correctDrift() {
@@ -694,6 +802,20 @@ export class P2PSpeakerClient {
     }
     const target = this.targetPosition();
     const err = a.currentTime - target;
+
+    // Decoded path: a reschedule is sample-accurate and does not re-buffer, so
+    // close anything audible straight away and ride the rest on a 0.3% ramp
+    // that nobody can hear.
+    if (this.wa?.ready) {
+      if (Math.abs(err) > 0.03) {
+        this.resyncExact();
+        this.set({ driftMs: Math.round(err * 1000), phase: 'PLAYING', position: a.currentTime });
+        return;
+      }
+      a.playbackRate = Math.abs(err) < 0.008 ? 1 : (err > 0 ? 0.997 : 1.003);
+      this.set({ position: a.currentTime, driftMs: Math.round(err * 1000), phase: 'PLAYING' });
+      return;
+    }
     // Safety net above the normal policy: a phone that is more than ~120 ms
     // out is plainly audible as an echo, and nudging playbackRate would take
     // tens of seconds to close that. Snap it, then let the gentle loop keep it
@@ -713,7 +835,9 @@ export class P2PSpeakerClient {
         this.updateBuffered();
         return;
       }
-      a.playbackRate = err > 0 ? 0.98 : 1.02;     // pull back gently meanwhile
+      // With an exact start the error is small and slow, so nudge by 0.5%
+      // (inaudible) rather than 2% (a noticeable pitch wobble).
+      a.playbackRate = err > 0 ? 0.995 : 1.005;
       this.set({ position: a.currentTime, driftMs: Math.round(err * 1000), phase: 'PLAYING' });
       this.updateBuffered();
       return;
@@ -732,7 +856,9 @@ export class P2PSpeakerClient {
     if (this.playTimer) window.clearTimeout(this.playTimer);
     try { this.conn?.close(); } catch {}
     try { this.peer?.destroy(); } catch {}
-    this.audio?.pause();
+    try { this.el?.pause(); } catch {}
+    this.wa?.dispose();
+    try { void this.ctx?.close(); } catch {}
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
     this.set({ conn: 'disconnected', phase: 'DISCONNECTED' });
   }
