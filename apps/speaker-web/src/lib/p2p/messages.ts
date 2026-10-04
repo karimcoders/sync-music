@@ -30,6 +30,8 @@ export type P2PMessage =
   | { type: 'TRACK_READY'; trackId: string }
   /** a speaker noticed holes in the transfer and asks for those chunks again */
   | { type: 'TRACK_NEED'; trackId: string; indexes: number[] }
+  /** a speaker was told to play a song it does not hold at all */
+  | { type: 'TRACK_WANT'; trackId: string }
   // transport (all timestamps are HOST-clock epoch ms) --------------------
   // Every transport change carries a monotonic `seq`. Speakers report the last
   // one they applied, so the host can tell who missed a command and re-send

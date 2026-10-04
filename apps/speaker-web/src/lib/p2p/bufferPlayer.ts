@@ -215,5 +215,9 @@ export class WebAudioPlayer {
     void out;
   }
 
+  /** Forget the song. Used when the host switches track: `ready` must go
+   *  false immediately so nothing can schedule the previous buffer. */
+  clear() { this.teardown(); this.buffer = null; this.pending = 0; }
+
   dispose() { this.teardown(); try { this.gain.disconnect(); } catch {} }
 }

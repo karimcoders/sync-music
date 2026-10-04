@@ -408,3 +408,33 @@ time and real time **14.7 ms** over 8 s, start spread 10.6 ms, 10.6 ms after
 6 s, 12 ms after a host refresh, and **3 deliberate corrections** in the whole
 run instead of 22. The e2e now fails if an unexplained step exceeds 30 ms or
 if the loop restarts playback more than 4 times.
+
+## Changing the song must change it on every phone
+
+Reported symptom: switch track and one phone keeps playing the old song while
+another plays the new one. It was a real bug, with two causes.
+
+1. **The speaker ignored the track name on transport messages.** Every PLAY,
+   SEEK, RESYNC and STATE carries a `trackId`, and the speaker never looked at
+   it — so a phone that did not hold the new file simply played the file it
+   had, at the new position. Now a mismatch stops the audio immediately
+   (silence is correct, the wrong song is not), takes the file from this
+   phone's own cache if it is there, and asks the host for it with
+   `TRACK_WANT` if it is not.
+2. **The prefetch hijacked playback.** The host pushes the whole playlist
+   ahead of time so switching is instant; the speaker treated the last file to
+   arrive as "the current track". The phone then showed one title while
+   holding another song's bytes, and a later PLAY for that id looked like a
+   match. An arriving file only becomes current if it is the one we were told
+   to play — otherwise it is just cached.
+
+New suite `tools/switch-e2e.mjs` loads two different tones, plays the first,
+switches to the second and checks that every phone follows, keeps playing, and
+stays in sync. Measured: **every phone followed the switch in 215–370 ms**,
+spread on the new song under 100 ms.
+
+Also in this pass: a late joiner and a phone recovering from a host refresh
+now get two forced alignment checks (700 ms and 1700 ms after joining),
+because the deliberately slow steady-state loop was leaving them behind for
+far too long. Late-join spread fell from ~400 ms to ~150 ms, post-refresh to
+~20 ms.

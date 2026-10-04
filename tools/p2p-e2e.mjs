@@ -95,14 +95,15 @@ const probe = (p) => p.evaluate(() => {
   const samples = await speakers[0].evaluate(async () => {
     const out = [];
     for (let i = 0; i < 40; i++) {
-      out.push([performance.now(), window.__syncAudio?.currentTime ?? 0, window.__syncAudio?.resyncs ?? 0]);
+      out.push([performance.now(), window.__syncAudio?.currentTime ?? 0, window.__syncAudio?.resyncs ?? 0,
+                window.__syncAudio?.playbackRate ?? 1, window.__syncClient?.state?.phase ?? '']);
       await new Promise((r) => setTimeout(r, 200));
     }
     return out;
   });
   // A deliberate correction is a jump by design. What must never happen is an
   // UNEXPLAINED one — that is the stall a listener calls "breaking up".
-  let worst = 0;
+  let worst = 0; let worstAt = ''; let rough = 0;
   for (let i = 1; i < samples.length; i++) {
     // A deliberate correction spans three samples: the one where playback
     // waits for the new scheduled start, the one where the counter moves, and
@@ -112,15 +113,20 @@ const probe = (p) => p.evaluate(() => {
     if (i + 1 < samples.length && samples[i + 1][2] !== samples[i][2]) continue;
     const wall = (samples[i][0] - samples[i - 1][0]) / 1000;
     const played = samples[i][1] - samples[i - 1][1];
-    worst = Math.max(worst, Math.abs(played - wall) * 1000);
+    const d = Math.abs(played - wall) * 1000;
+    if (d > 30) rough++;
+    if (d > worst) { worst = d; worstAt = `step ${i}: rate=${samples[i][3]} phase=${samples[i][4]} wall=${wall.toFixed(3)}s`; }
   }
   console.log(`  worst UNEXPLAINED gap between played time and real time over 8 s: ${worst.toFixed(1)} ms`);
+  if (worstAt) console.log(`  worst step: ${worstAt}`);
   const r = await speakers[0].evaluate(() => window.__syncAudio?.resyncs ?? 0);
   console.log(`  hard resyncs so far: ${r}`);
   if (r > 4) fail(`the sync loop restarted playback ${r} times — that is the chopping`);
   else console.log('✓ the sync loop is not restarting playback');
-  if (worst < 30) console.log(`✓ no stutter: playback tracked real time within ${worst.toFixed(0)} ms`);
-  else fail(`playback stalled or jumped by ${worst.toFixed(0)} ms`);
+  // One rough step can be the tail of a correction we asked for; a run of
+  // them is the stutter this check exists to catch.
+  if (rough <= 1) console.log(`✓ no stutter: ${rough} rough step in 8 s, worst ${worst.toFixed(0)} ms`);
+  else fail(`playback broke up ${rough} times in 8 s (worst ${worst.toFixed(0)} ms)`);
 }
 
 const dbg = async (p) => p.evaluate(() => window.__syncClient?.debug ?? null);

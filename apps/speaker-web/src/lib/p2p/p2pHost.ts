@@ -390,6 +390,10 @@ export class P2PHostClient {
         }
         break;
       }
+      case 'TRACK_WANT':
+        // That phone is on the wrong song — send it the whole file now.
+        void this.pushTrackTo(peerId, m.trackId);
+        break;
       case 'TRACK_NEED':
         void this.resendChunks(peerId, m.trackId, m.indexes);
         break;

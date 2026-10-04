@@ -208,7 +208,7 @@ export default function Host({ go }: { go: (p: string) => void }) {
                 </div>
                 <div className="tiny">{t.artist} · {fmtTime(t.duration)}</div>
               </div>
-              <button className="icon-btn" onClick={() => c?.playTrack(t.id)}>▶</button>
+              <button className="icon-btn" data-testid={`play-track-${i}`} onClick={() => c?.playTrack(t.id)}>▶</button>
               <button className="icon-btn" onClick={() => c?.move(i, -1)}>↑</button>
               <button className="icon-btn" onClick={() => c?.move(i, +1)}>↓</button>
               <button className="icon-btn" onClick={() => c?.remove(t.id)}>✕</button>

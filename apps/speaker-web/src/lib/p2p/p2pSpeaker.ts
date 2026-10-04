@@ -232,13 +232,71 @@ export class P2PSpeakerClient {
    * silent for the whole song. Now we notice the gap and ask for exactly the
    * missing pieces again.
    */
+  /**
+   * Is this phone holding the song the host is talking about?
+   *
+   * Every transport message names its track. Ignoring that name was a real
+   * bug: a phone that had not received the new song simply carried on with
+   * the old one at the new position, so two phones played two different
+   * songs. Now a mismatch stops the music at once — silence is correct, the
+   * wrong song is not — and we fetch the right one, from this phone's cache
+   * if it is there (instant) or from the host if it is not.
+   */
+  private wantedTrack: string | null = null;
+  private ensureTrack(trackId: string | null | undefined): boolean {
+    if (!trackId || trackId === this.trackId) return true;
+    if (this.wantedTrack === trackId) return false;   // already fetching
+    this.wantedTrack = trackId;
+
+    try { this.el?.pause(); } catch {}
+    this.wa?.clear();
+    this.decodedId = null;
+    this.trackId = null;
+    this.set({ phase: 'SYNCING', info: 'Switching to the new song…', bufferedPct: 0 });
+
+    void getTrack(trackId)
+      .then((hit) => {
+        if (this.wantedTrack !== trackId) return;     // the host moved on again
+        if (hit) { this.adoptTrack(trackId, hit.title, new Blob([hit.bytes], { type: hit.mimeType })); return; }
+        this.send({ type: 'TRACK_WANT', trackId });
+      })
+      .catch(() => this.send({ type: 'TRACK_WANT', trackId }));
+    return false;
+  }
+
+  /**
+   * Should an arriving file become the song this phone is playing?
+   *
+   * The host sends the WHOLE playlist ahead of time so a switch is instant.
+   * That prefetch used to hijack playback: the last file to arrive became
+   * "the track", so the phone showed one song, held another's bytes, and a
+   * later PLAY for that id looked like a match and played the wrong audio.
+   * A file only becomes current if it is the one we were told to play.
+   */
+  private shouldBeCurrent(trackId: string) {
+    if (this.wantedTrack) return this.wantedTrack === trackId;
+    if (this.trackId) return this.trackId === trackId;
+    return true;                       // nothing playing yet: first one wins
+  }
+
   /** Point playback at a complete track, wherever the bytes came from. */
-  private adoptTrack(trackId: string, title: string, blob: Blob) {
+  private adoptTrack(trackId: string, title: string, blob: Blob, current = true) {
+    if (!current) {
+      // keep it for later; do not touch what is playing
+      this.haveTrack = this.haveTrack ?? null;
+      this.send({ type: 'TRACK_READY', trackId });
+      return;
+    }
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
     this.objectUrl = URL.createObjectURL(blob);
     this.blob = blob;
     this.trackId = trackId;
     this.haveTrack = trackId;
+    if (this.wantedTrack === trackId) this.wantedTrack = null;
+    // Drop the decoded buffer only when the song really changed. Re-decoding
+    // the same file costs a second of CPU on a phone, and doing it at the
+    // moment playback starts is exactly when that hurts.
+    if (this.decodedId && this.decodedId !== trackId) { this.wa?.clear(); this.decodedId = null; }
     this.set({ trackTitle: title, trackArtist: '', info: null, bufferedPct: 100 });
     if (this.audioEnabled) this.loadAudio();
     this.send({ type: 'TRACK_READY', trackId });
@@ -352,14 +410,17 @@ export class P2PSpeakerClient {
         // or we downloaded it on an earlier night: nothing to transfer at all
         const cached = await getTrack(m.trackId);
         if (cached) {
-          this.adoptTrack(m.trackId, cached.title, new Blob([cached.bytes], { type: cached.mimeType }));
+          this.adoptTrack(m.trackId, cached.title, new Blob([cached.bytes], { type: cached.mimeType }),
+                          this.shouldBeCurrent(m.trackId));
           break;
         }
         this.incoming = {
           trackId: m.trackId, title: m.title, mime: m.mime, chunks: m.chunks,
           parts: new Array(m.chunks), got: 0,
         };
-        this.set({ trackTitle: m.title, info: m.chunks > 8 ? 'Receiving the track…' : null, bufferedPct: 0 });
+        if (this.shouldBeCurrent(m.trackId)) {
+          this.set({ trackTitle: m.title, info: m.chunks > 8 ? 'Receiving the track…' : null, bufferedPct: 0 });
+        }
         this.lastChunkAt = Date.now();
         this.startChunkChase();
         break;
@@ -386,7 +447,7 @@ export class P2PSpeakerClient {
           });
           if (!this.cachedIds.includes(inc.trackId)) this.cachedIds.push(inc.trackId);
         });
-        this.adoptTrack(inc.trackId, inc.title, blob);
+        this.adoptTrack(inc.trackId, inc.title, blob, this.shouldBeCurrent(inc.trackId));
         break;
       }
 
@@ -398,12 +459,13 @@ export class P2PSpeakerClient {
       case 'STATE': {
         // full repair snapshot from the host
         this.appliedSeq = Math.max(this.appliedSeq, m.seq);
+        const switched = !this.ensureTrack(m.trackId);
         this.transportPlaying = m.playing;
         this.basePosition = m.position;
         this.baseHostTime = m.atHostTime;
         this.set({ playing: m.playing, volume: m.volume, trackTitle: m.title || this.state.trackTitle });
         this.applyVolume();
-        if (!this.audioEnabled) break;
+        if (!this.audioEnabled || switched) break;
         if (m.playing) this.catchUp();
         else { this.audio?.pause(); try { if (this.audio) this.audio.currentTime = m.position; } catch {} }
         break;
@@ -416,6 +478,7 @@ export class P2PSpeakerClient {
         this.baseHostTime = m.startAt;
         this.set({ playing: true });
         if (!this.audioEnabled) { this.set({ phase: 'AUDIO_DISABLED' }); break; }
+        if (!this.ensureTrack(m.trackId)) break;   // wrong song: stay silent until we have the right one
         this.loadAudio();
         this.schedulePlay(m.position, m.startAt);
         break;
@@ -443,6 +506,7 @@ export class P2PSpeakerClient {
 
       case 'SEEK': {
         this.appliedSeq = Math.max(this.appliedSeq, m.seq);
+        if (!this.ensureTrack(m.trackId)) break;
         this.basePosition = m.position;
         this.baseHostTime = m.applyAt;
         const wait = Math.max(0, m.applyAt - this.clock.now());
@@ -462,6 +526,7 @@ export class P2PSpeakerClient {
         this.baseHostTime = m.atHostTime;
         this.drift.reset();
         this.set({ playing: m.playing });
+        if (!this.ensureTrack(m.trackId)) break;
         if (this.audioEnabled) this.catchUp();
         break;
 
@@ -663,6 +728,7 @@ export class P2PSpeakerClient {
       const leadMs = startAt - this.clock.now() - this.outputOffsetMs;
       this.settlingSince = Date.now();
       this.wa.scheduleStart(position, leadMs / 1000);
+      this.armJoinChecks();
       this.set({ phase: 'PLAYING', playing: true });
       this.drift.reset();
       return;
@@ -715,6 +781,7 @@ export class P2PSpeakerClient {
     if (this.wa?.ready && this.transportPlaying) {
       this.settlingSince = Date.now();
       this.resyncExact();
+      this.armJoinChecks();
       this.set({ phase: 'PLAYING', playing: true });
       return;
     }
@@ -823,6 +890,27 @@ export class P2PSpeakerClient {
   private settlingSince = 0;
   resyncCount = 0;
   private lastResyncAt = 0;
+
+  /**
+   * Join checks.
+   *
+   * A phone that joins mid-song, or comes back after the host refreshed, is
+   * aligned against a clock estimate that is seconds old at best. The steady
+   * loop deliberately corrects slowly, which left a late joiner audibly
+   * behind for a long time. So right after a join we look twice more and
+   * force an exact alignment if it is still out — this window is short and
+   * nobody is settled into the song yet.
+   */
+  private armJoinChecks() {
+    for (const delay of [700, 1700]) {
+      this.timers.push(window.setTimeout(() => {
+        if (!this.transportPlaying || !this.wa?.ready || !this.audioEnabled) return;
+        const err = this.wa.currentTime - this.targetPosition();
+        if (Math.abs(err) > 0.04) { this.resyncExact(); this.smoothErr = 0; }
+      }, delay));
+    }
+  }
+
   private resyncExact() {
     this.resyncCount++;
     this.lastResyncAt = Date.now();
