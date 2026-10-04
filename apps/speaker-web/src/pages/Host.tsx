@@ -204,6 +204,23 @@ export default function Host({ go }: { go: (p: string) => void }) {
           </label>
         </Row>
         {s.uploading && <><div style={{ height: 10 }} /><Meter value={100} /></>}
+        {s.delivery && s.delivery.phase !== 'done' && (
+          <div style={{ marginTop: 10 }}>
+            <Row>
+              <div className="tiny">
+                {s.delivery.phase === 'uploading' ? `Uploading to the cloud — ${s.delivery.pct}%`
+                  : s.delivery.phase === 'delivering' ? 'Phones are downloading it'
+                  : 'Sending straight to the phones'}
+              </div>
+              <div className="tiny dim" data-testid="delivery-note">{s.delivery.note}</div>
+            </Row>
+            <div style={{ height: 6 }} />
+            <Meter value={s.delivery.phase === 'uploading' ? s.delivery.pct : 100} />
+            <div className="tiny dim" style={{ marginTop: 6 }}>
+              {s.speakers.filter((x: any) => x.ready).length}/{s.speakers.length} phone(s) have the song
+            </div>
+          </div>
+        )}
         <div className="list" data-testid="playlist">
           {(s.transport?.playlist ?? []).map((t, i) => (
             <div className="list-item" key={t.id}>

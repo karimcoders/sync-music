@@ -478,6 +478,11 @@ export class P2PHostClient {
       }
       case 'TRACK_READY':
         c.have.add(m.trackId);
+        this.publishSpeakers();
+        // everybody has it: say so and stop showing progress
+        if ([...this.conns.values()].every((x) => x.have.has(m.trackId))) {
+          this.set({ delivery: { trackId: m.trackId, phase: 'done', pct: 100, note: 'every phone has it' } });
+        }
         break;
       case 'TRACK_WANT': {
         // That phone is on a song it does not hold and cannot play anything
@@ -530,9 +535,13 @@ export class P2PHostClient {
     // A phone counts as a speaker once it has introduced itself. The spare
     // dials a joining phone makes can open a channel and never say HELLO;
     // showing those as extra speakers was simply wrong.
+    // "ready" means: this phone has confirmed it holds the song that is
+    // current, so the host can show 3/4 phones have it instead of leaving
+    // the operator guessing.
+    const cur = this.transport.playlist[this.transport.trackIndex]?.id;
     const speakers = [...this.conns.entries()]
       .filter(([peerId]) => this.deviceOf.has(peerId))
-      .map(([, c]) => c.info);
+      .map(([, c]) => ({ ...c.info, ready: cur ? c.have.has(cur) : true }) as typeof c.info & { ready: boolean });
     const drift = speakers.filter((s) => s.state === 'playing');
     this.set({
       speakers,
@@ -589,14 +598,31 @@ export class P2PHostClient {
     const f = this.files.get(trackId);
     if (!cfg || !f || this.urls.has(trackId)) return;
     try {
-      this.set({ info: `Uploading “${f.track?.title ?? trackId}” to the cloud once…` });
-      const url = await uploadTrack(cfg, trackId, f.bytes, f.track?.filename || `${trackId}.mp3`);
+      const started = Date.now();
+      const mb = (f.bytes.byteLength / 1048576).toFixed(1);
+      this.set({ delivery: { trackId, phase: 'uploading', pct: 0, note: `Uploading ${mb} MB…` } });
+      const url = await uploadTrack(
+        cfg, trackId, f.bytes, f.track?.filename || `${trackId}.mp3`,
+        (pct) => {
+          // a real estimate, not a spinner: how long the rest will take at
+          // the speed measured so far
+          const secs = (Date.now() - started) / 1000;
+          const left = pct > 3 ? Math.round((secs / pct) * (100 - pct)) : 0;
+          this.set({ delivery: { trackId, phase: 'uploading', pct, note: left ? `about ${left}s left` : 'starting…' } });
+        },
+      );
       this.urls.set(trackId, url);
-      this.set({ info: 'Cloud copy ready — phones download it directly.' });
+      this.set({
+        info: 'Cloud copy ready — phones download it directly.',
+        delivery: { trackId, phase: 'delivering', pct: 100, note: `uploaded in ${Math.round((Date.now() - started) / 1000)}s` },
+      });
       this.conns.forEach((c) => this.sendUrl(c.conn, trackId));
     } catch (e: any) {
       // Never fatal: fall straight back to the phone-to-phone path.
-      this.set({ error: `Cloud upload failed (${e?.message || 'unknown'}). Sending it to the phones directly instead.` });
+      this.set({
+        error: `Cloud upload failed (${e?.message || 'unknown'}). Sending it to the phones directly instead.`,
+        delivery: { trackId, phase: 'direct', pct: 0, note: 'cloud failed — sending from this phone' },
+      });
       await Promise.all([...this.conns.keys()].map((p) => this.enqueueTrack(p, trackId, { urgent: true })));
     }
   }

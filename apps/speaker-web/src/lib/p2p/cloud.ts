@@ -62,6 +62,36 @@ function toBase64(bytes: ArrayBuffer): string {
   return btoa(s);
 }
 
+/**
+ * The same PUT, but with real upload progress.
+ *
+ * `fetch` cannot report how much of a request body has gone out, and the
+ * host needs to show that: a 9 MB song over a phone's uplink is not instant
+ * and a progress bar is the difference between "working" and "broken".
+ */
+function ghPutWithProgress(
+  cfg: CloudConfig, path: string, body: string, onProgress?: (pct: number) => void,
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', `https://api.github.com${path}`);
+    xhr.setRequestHeader('Authorization', `token ${cfg.token}`);
+    xhr.setRequestHeader('Accept', 'application/vnd.github+json');
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress?.(Math.min(99, Math.round((e.loaded / e.total) * 100)));
+    };
+    xhr.onload = () => {
+      let parsed: any = {};
+      try { parsed = JSON.parse(xhr.responseText || '{}'); } catch { /* empty */ }
+      if (xhr.status >= 200 && xhr.status < 300) { onProgress?.(100); resolve(parsed); }
+      else reject(new Error(parsed.message || `GitHub said ${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error('the upload could not reach GitHub'));
+    xhr.send(body);
+  });
+}
+
 async function gh(cfg: CloudConfig, path: string, init: RequestInit = {}) {
   const r = await fetch(`https://api.github.com${path}`, {
     ...init,
@@ -103,6 +133,7 @@ export async function uploadTrack(
   trackId: string,
   bytes: ArrayBuffer,
   filename: string,
+  onProgress?: (pct: number) => void,
 ): Promise<string> {
   await ensureBranch(cfg);
   const safe = filename.replace(/[^\w.\-]+/g, '_').slice(-60) || 'track';
@@ -112,14 +143,12 @@ export async function uploadTrack(
     const got = await gh(cfg, `/repos/${cfg.repo}/contents/${path}?ref=${cfg.branch}`);
     if (got?.download_url) return got.download_url as string;
   } catch { /* first time */ }
-  const res = await gh(cfg, `/repos/${cfg.repo}/contents/${path}`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      message: `audio: ${safe}`,
-      branch: cfg.branch,
-      content: toBase64(bytes),
-    }),
-  });
+  const res = await ghPutWithProgress(
+    cfg,
+    `/repos/${cfg.repo}/contents/${path}`,
+    JSON.stringify({ message: `audio: ${safe}`, branch: cfg.branch, content: toBase64(bytes) }),
+    onProgress,
+  );
   const url = res?.content?.download_url as string | undefined;
   if (!url) throw new Error('GitHub accepted the file but gave no download URL.');
   return url;

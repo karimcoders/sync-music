@@ -23,6 +23,16 @@ export interface HostState {
   micOn?: boolean;
   /** direct mode only: the video every phone is playing from YouTube */
   youtubeId?: string | null;
+  /**
+   * direct mode only: how the song being added is reaching the phones, so the
+   * host can see progress instead of guessing.
+   */
+  delivery?: {
+    trackId: string;
+    phase: 'uploading' | 'delivering' | 'direct' | 'done';
+    pct: number;
+    note: string;
+  } | null;
 }
 
 const STORE = 'sync-music.host';

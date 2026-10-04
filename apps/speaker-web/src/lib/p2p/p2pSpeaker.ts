@@ -254,11 +254,28 @@ export class P2PSpeakerClient {
     if (this.wantedTrack === trackId) return false;   // already fetching
     this.wantedTrack = trackId;
 
-    try { this.el?.pause(); } catch {}
-    this.wa?.clear();
-    this.decodedId = null;
-    this.trackId = null;
-    this.set({ phase: 'SYNCING', info: 'Switching to the new song…', bufferedPct: 0 });
+    // Do NOT go silent.
+    //
+    // This used to stop the music, throw the decoded song away and show
+    // "Switching to the new song…" for as long as the download took. On a
+    // real phone that is a hole in the party. The song already playing is a
+    // perfectly good thing to listen to until the new one is actually here,
+    // so it keeps playing and the swap happens the moment the file lands.
+    // Nothing is thrown away until there is something to replace it with.
+    const standIn = !!this.trackId && !this.el?.paused;
+    this.set({
+      phase: standIn ? 'PLAYING' : 'SYNCING',
+      info: standIn
+        ? 'New song is downloading — this one keeps playing until it is ready.'
+        : 'Getting the new song…',
+      bufferedPct: 0,
+    });
+    if (!standIn) {
+      try { this.el?.pause(); } catch {}
+      this.wa?.clear();
+      this.decodedId = null;
+      this.trackId = null;
+    }
 
     void getTrack(trackId)
       .then((hit) => {
@@ -365,6 +382,8 @@ export class P2PSpeakerClient {
       this.send({ type: 'TRACK_READY', trackId });
       return;
     }
+    const replacing = !!this.trackId && this.trackId !== trackId;
+    if (replacing) { try { this.el?.pause(); } catch {} this.wa?.clear(); this.decodedId = null; }
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
     this.objectUrl = URL.createObjectURL(blob);
     this.blob = blob;
@@ -1077,6 +1096,8 @@ export class P2PSpeakerClient {
   private catchUp() {
     const a = this.audio;
     if (!a || !this.audioEnabled) return;
+    // still on the previous song while the new one arrives: leave it alone
+    if (this.wantedTrack && this.trackId && this.wantedTrack !== this.trackId) return;
     if (this.wa && !this.wa.ready) {
       this.decodeForExactPlayback();
       this.set({ phase: 'SYNCING', info: 'Preparing the song on this phone — it will join in a moment.' });
@@ -1249,6 +1270,13 @@ export class P2PSpeakerClient {
     // Wait for a usable offset, not a perfect one: right after a (re)connect
     // the estimate is still settling, and refusing to correct during those
     // seconds is exactly when a phone drifts audibly away from the others.
+    // A stand-in song (the previous one, still playing while the new one
+    // downloads) must not be dragged onto the NEW song's timeline — that
+    // would seek it to a meaningless position.
+    if (this.wantedTrack && this.trackId && this.wantedTrack !== this.trackId) {
+      if (a) this.set({ position: a.currentTime });
+      return;
+    }
     const usable = this.clock.synced || this.clock.sampleCount >= 3;
     if (!a || !this.audioEnabled || !this.transportPlaying || a.paused || !usable) {
       if (a) this.set({ position: a.currentTime });

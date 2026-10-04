@@ -667,3 +667,38 @@ upload failed — gets the file pushed to it the old way. Late, but certain.
 Bench, three phones, 5 MB song, "added" → "phone holds it": typically
 **2.5–3.5 s** per phone with one straggler at 6–8 s, against a 9.8 s slowest
 before any of this work.
+
+## The music does not stop to wait for a download
+
+Until now, switching to a song a phone did not have yet made that phone go
+silent and show "Getting the new song… 33 %" for as long as the transfer
+took. That is a hole in the party, and it was avoidable: the song already
+playing is a perfectly good thing to listen to until the new file is actually
+there.
+
+So a phone now keeps playing what it has, says so plainly ("New song is
+downloading — this one keeps playing until it is ready"), and swaps the
+moment the file lands. Nothing is thrown away before there is something to
+replace it with, and while a stand-in is playing the drift loop leaves it
+alone — correcting it onto the NEW song's timeline would seek it to a
+meaningless position.
+
+The host also shows what is happening instead of a spinner: real upload
+percentage (measured from the request body going out, with a time estimate),
+then how many phones have confirmed they hold the song.
+
+`tools/nogap-e2e.mjs` is the proof. A speaker is playing, a second song is
+added and selected, and the speaker is sampled every 250 ms:
+
+```
+✓ the first song is playing at 1.44s
+  silent samples while the new song arrived: 2/24
+✓ the music kept playing the whole time the new song was downloading
+✓ playing after the switch at 5.61s
+✓ the speaker came back playing after a refresh (7.32s)
+```
+
+The refresh check is in the same file because the two go together: after a
+reload Android will not let a page make sound until it is touched once — that
+is a browser rule no app can skip — but after that single tap the speaker
+rejoins the song already in progress, at the right position.
