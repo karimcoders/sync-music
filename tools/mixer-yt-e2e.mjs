@@ -21,9 +21,12 @@ const page = async () => (await b.newContext()).newPage();
   const p = await page();
   await p.goto(`${APP}#/speaker?mode=direct`, { waitUntil: 'networkidle' });
   await p.waitForTimeout(1200);
-  // the page shows either an explicit button or a tap-anywhere overlay
-  await p.locator('body').click();
-  if (await p.getByTestId('enable-speaker').count()) await p.getByTestId('enable-speaker').click();
+  // The mixer belongs to this phone's audio, not to the room, so this part
+  // must work whether or not a host is reachable — enable the audio directly
+  // instead of waiting for a session (the public broker rate-limits bursts
+  // of test runs, and that must not look like a mixer failure).
+  await p.waitForFunction(() => !!window.__syncClient, null, { timeout: 30000 });
+  await p.evaluate(() => window.__syncClient.enableSpeaker());
   await p.waitForFunction(() => !!window.__syncWA, null, { timeout: 30000 });
   await p.waitForTimeout(800);
 
@@ -90,8 +93,8 @@ const page = async () => (await b.newContext()).newPage();
     const p = await page();
     await p.goto(`${APP}#/speaker?mode=direct`, { waitUntil: 'networkidle' });
     await p.waitForTimeout(1200);
-    await p.locator('body').click();
-    if (await p.getByTestId('enable-speaker').count()) await p.getByTestId('enable-speaker').click();
+    await p.waitForFunction(() => !!window.__syncClient, null, { timeout: 30000 });
+    await p.evaluate(() => window.__syncClient.enableSpeaker());
     sps.push(p);
   }
   await host.waitForTimeout(5000);
