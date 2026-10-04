@@ -56,6 +56,10 @@ log(`✓ ${speakers.length} speakers connected`);
 
 const t0 = Date.now();
 await host.getByTestId('file').setInputFiles(FILE);
+// press play straight away: what matters is when SOUND starts, not when the
+// download finishes
+host.waitForTimeout(1200).then(() => host.getByTestId('play').click().catch(() => {}));
+const sound = new Array(speakers.length).fill(null);
 const times = new Array(speakers.length).fill(null);
 for (let k = 0; k < 120 && times.some((t) => t === null); k++) {
   await Promise.all(speakers.map(async (p, i) => {
@@ -66,9 +70,22 @@ for (let k = 0; k < 120 && times.some((t) => t === null); k++) {
     }).catch(() => false);
     if (ok) times[i] = Date.now() - t0;
   }));
+  await Promise.all(speakers.map(async (p, i) => {
+    if (sound[i] !== null) return;
+    const playing = await p.evaluate(() => {
+      const a = window.__syncAudio;
+      return !!a && !a.paused && a.currentTime > 0.05;
+    }).catch(() => false);
+    if (playing) sound[i] = Date.now() - t0;
+  }));
   await host.waitForTimeout(250);
 }
-times.forEach((t, i) => log(`  speaker ${i + 1}: song in hand after ${t === null ? 'NEVER' : t + ' ms'}`));
+times.forEach((t, i) => log(
+  `  speaker ${i + 1}: SOUND after ${sound[i] === null ? 'never' : sound[i] + ' ms'}` +
+  `, full copy after ${t === null ? 'NEVER' : t + ' ms'}`));
+const firstSound = sound.filter((x) => x !== null);
+if (firstSound.length === speakers.length) log(`✓ every phone was making sound within ${Math.max(...firstSound)} ms`);
+else fail('a phone never made a sound');
 if (times.some((t) => t === null)) fail('a phone never received the song');
 else {
   const worst = Math.max(...times);

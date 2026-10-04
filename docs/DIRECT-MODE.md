@@ -702,3 +702,35 @@ The refresh check is in the same file because the two go together: after a
 reload Android will not let a page make sound until it is touched once — that
 is a browser rule no app can skip — but after that single tap the speaker
 rejoins the song already in progress, at the right position.
+
+## Sound first: a phone does not wait for 100 %
+
+A phone no longer has to finish downloading before it makes a sound. When it
+is handed a URL for the song it is supposed to be playing, it points an
+`<audio>` element straight at it and starts — the browser asks the server only
+for the bytes it needs next (HTTP range requests). The full copy keeps
+downloading quietly behind it, and when it lands the song is decoded and
+playback hands over to the sample-accurate engine without a gap. Streaming
+gets the music out fast; the decoded copy makes it exact.
+
+One trap worth recording: a media element loading from another origin is
+"tainted", and routing a tainted element through Web Audio outputs **silence**
+— the song looks like it is playing and nobody hears anything. The element now
+sets `crossOrigin = 'anonymous'` before the URL, which works because the file
+is served with `access-control-allow-origin: *`.
+
+`tools/stream-e2e.mjs`: two phones are playing one song, a second song they
+have never held is added and selected.
+
+```
+✓ the new song is in the cloud
+  phone 1: sound on the NEW song after 489 ms
+  phone 2: sound on the NEW song after 489 ms
+```
+
+What this does **not** fix, honestly: the host still has to finish uploading
+the song once before any phone can be given the URL. GitHub's contents API
+takes the file in a single request, so there is no "play from 5 % of the
+upload". What makes it feel instant in practice is that songs are uploaded and
+prefetched while an earlier one plays — by the time anybody presses the next
+song, the phones already know where to get it.

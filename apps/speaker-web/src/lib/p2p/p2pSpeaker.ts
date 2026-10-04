@@ -263,6 +263,7 @@ export class P2PSpeakerClient {
     // so it keeps playing and the swap happens the moment the file lands.
     // Nothing is thrown away until there is something to replace it with.
     const standIn = !!this.trackId && !this.el?.paused;
+    if (this.streamingId === trackId) return false;   // already streaming this very song
     this.set({
       phase: standIn ? 'PLAYING' : 'SYNCING',
       info: standIn
@@ -347,6 +348,57 @@ export class P2PSpeakerClient {
    * still running underneath and will finish the job.
    */
   private cloudPulls = new Set<string>();
+  private streamingId: string | null = null;
+
+  /**
+   * Start the song NOW, from the URL, without waiting for the download.
+   *
+   * This is the answer to "why does it wait for 100 % before it plays?". It
+   * does not have to: an <audio> element given a URL streams it, asking the
+   * server only for the bytes it needs next (HTTP range requests), so sound
+   * starts after about a second instead of after the whole file.
+   *
+   * The full copy still downloads quietly behind it. When it lands, the song
+   * is decoded and playback hands over to the sample-accurate engine without
+   * a gap — streaming gets the music out fast, the decoded copy makes it
+   * exact.
+   */
+  private startStreaming(trackId: string, title: string, url: string): boolean {
+    const el = this.el;
+    if (!el || !this.audioEnabled) return false;
+    try {
+      this.wa?.clear();
+      this.decodedId = null;
+      this.trackId = trackId;
+      this.streamingId = trackId;
+      if (this.wantedTrack === trackId) this.wantedTrack = null;
+      // The file comes from another origin. Without this the browser treats
+      // the element as "tainted" and Web Audio outputs SILENCE through it —
+      // the song would look like it was playing and nobody would hear a
+      // thing. The host serves it with access-control-allow-origin: *, so
+      // asking for an anonymous CORS fetch is all that is needed.
+      el.crossOrigin = 'anonymous';
+      el.src = url;
+      el.dataset.audioId = trackId;
+      el.load();
+      this.wa?.attachElement(el);
+      this.applyVolume();
+      this.set({ trackTitle: title, info: 'Playing while it downloads…', phase: 'PLAYING' });
+      if (this.transportPlaying) {
+        const go = () => {
+          try { el.currentTime = this.targetPosition(); } catch {}
+          void el.play().catch(() => {});
+        };
+        if (el.readyState >= 1) go();
+        else el.addEventListener('loadedmetadata', go, { once: true });
+      }
+      return true;
+    } catch {
+      this.streamingId = null;
+      return false;
+    }
+  }
+
   private async pullFromCloud(trackId: string, title: string, mime: string, url: string) {
     if (this.cloudPulls.has(trackId)) return;
     if (this.trackId === trackId && this.blob) return;      // already have it
@@ -354,17 +406,28 @@ export class P2PSpeakerClient {
     if (cached) { this.send({ type: 'TRACK_READY', trackId }); return; }
     this.cloudPulls.add(trackId);
     const current = () => this.wantedTrack === trackId || this.hostTrackId === trackId;
+    // sound first: stream it right away if this is the song we are meant to
+    // be playing, then carry on fetching the real copy underneath
+    if (current() && this.streamingId !== trackId) this.startStreaming(trackId, title, url);
     try {
       const bytes = await fetchTrack(url, (pct) => {
-        if (current()) this.set({ info: `Downloading the song… ${pct}%`, bufferedPct: pct });
+        if (!current()) return;
+        this.set({
+          info: this.streamingId === trackId
+            ? `Playing while it downloads… ${pct}%`
+            : `Getting the song… ${pct}%`,
+          bufferedPct: pct,
+        });
       });
       await putTrack({
         id: trackId, title, artist: '', filename: title, mimeType: mime || 'audio/mpeg',
         size: bytes.byteLength, duration: 0, bytes,
       });
       this.send({ type: 'TRACK_READY', trackId });
-      // if this is the song we are waiting for, start it now
-      if (current() || !this.trackId) {
+      // The full copy is here. Hand over from the stream to the decoded,
+      // sample-accurate engine — same song, same position, no gap.
+      if (current() || this.streamingId === trackId || !this.trackId) {
+        this.streamingId = null;
         this.adoptTrack(trackId, title, new Blob([bytes], { type: mime || 'audio/mpeg' }), true);
       }
     } catch {
