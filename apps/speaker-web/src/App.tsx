@@ -3,6 +3,8 @@ import Home from './pages/Home';
 import Host from './pages/Host';
 import Speaker from './pages/Speaker';
 import SoundCheck from './pages/SoundCheck';
+import HostLogin from './components/HostLogin';
+import { isUnlocked } from './lib/auth';
 
 /**
  * Minimal router. Works both when the Node server serves the app at "/" and
@@ -20,6 +22,9 @@ function currentPath() {
 
 export default function App() {
   const [path, setPath] = useState(currentPath());
+  // The controller is locked away from guests; the gate lives at the route so
+  // the player component itself never renders half-mounted.
+  const [owner, setOwner] = useState(isUnlocked());
 
   useEffect(() => {
     const onPop = () => setPath(currentPath());
@@ -35,7 +40,11 @@ export default function App() {
     window.scrollTo(0, 0);
   };
 
-  if (path === '/host') return <Host go={go} />;
+  if (path === '/host') {
+    return owner
+      ? <Host go={go} />
+      : <HostLogin go={go} onUnlock={() => setOwner(true)} />;
+  }
   if (path === '/speaker') return <Speaker go={go} />;
   if (path === '/sound') return <SoundCheck go={go} />;
   return <Home go={go} />;

@@ -15,8 +15,11 @@ export type TabKey = 'host' | 'speaker' | 'sound';
 
 /** Bottom navigation, the way a phone app does it. */
 export function TabBar({ tab, go }: { tab: TabKey; go: (p: string) => void }) {
+  // The controller tab only exists for the signed-in owner: a guest never even
+  // sees a way into it.
+  const owner = sessionStorage.getItem('sync-music.unlocked') === '1';
   const items: Array<{ key: TabKey; path: string; label: string; icon: ReactNode }> = [
-    { key: 'host', path: '/host', label: 'PLAYER', icon: Icons.play },
+    ...(owner ? [{ key: 'host' as TabKey, path: '/host', label: 'PLAYER', icon: Icons.play }] : []),
     { key: 'speaker', path: '/speaker', label: 'SPEAKER', icon: Icons.speaker },
     { key: 'sound', path: '/sound', label: 'SOUND', icon: Icons.meter },
   ];
@@ -166,6 +169,7 @@ export const Icons = {
   resync: svg(<path d="M12 5a7 7 0 1 0 6.3 3.9l1.7-.9A9 9 0 1 1 12 3v2Zm0-3 4 3-4 3V2Z" />),
   meter: svg(<path d="M12 4a8 8 0 0 1 7.5 10.8l-1.9-.7A6 6 0 1 0 6.4 14l-1.9.7A8 8 0 0 1 12 4Zm0 4 3.4 4.2a2.2 2.2 0 1 1-3.4-.2V8Z" />),
   mic: svg(<path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Zm-6 8h2a4 4 0 0 0 8 0h2a6 6 0 0 1-5 5.9V20h-2v-3.1A6 6 0 0 1 6 11Z" />),
+  lock: svg(<path d="M12 2a5 5 0 0 1 5 5v3h1.5A1.5 1.5 0 0 1 20 11.5v8A1.5 1.5 0 0 1 18.5 21h-13A1.5 1.5 0 0 1 4 19.5v-8A1.5 1.5 0 0 1 5.5 10H7V7a5 5 0 0 1 5-5Zm0 2a3 3 0 0 0-3 3v3h6V7a3 3 0 0 0-3-3Z" />),
   speaker: svg(<path d="M4 9.5h3.2L12 5.5v13L7.2 14.5H4v-5Zm11.2-1.1a5 5 0 0 1 0 7.2l-1.3-1.3a3.2 3.2 0 0 0 0-4.6l1.3-1.3Zm2.4-2.5a8.4 8.4 0 0 1 0 12.2l-1.3-1.3a6.6 6.6 0 0 0 0-9.6l1.3-1.3Z" />),
 };
 

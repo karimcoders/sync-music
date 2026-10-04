@@ -292,3 +292,26 @@ What is **not** possible, stated plainly:
   printed by `tools/p2p-e2e.mjs`, not a promise.
 
 New suite: `node tools/offline-e2e.mjs <url>`.
+
+## The controller is locked; guests only ever see the speaker
+
+A guest who is handed the link must not be able to take the music over, so the
+app now has two faces:
+
+* **Home** shows one thing — *Join as a speaker* — plus the sound tools. There
+  is no mention of the controller; the only way in is the small padlock in the
+  corner.
+* **`/#/host` asks for an id and a password.** First run on a phone accepts the
+  shipped default (`admin` / `syncmusic`) and immediately makes the owner
+  choose their own. Only a salted SHA-256 is stored, never the password.
+* The bottom tab bar shows **PLAYER** only to a signed-in owner, and the player
+  has a **Sign out** button.
+
+Said plainly: this is a lock on the interface. The app is a static page, so a
+determined person can read its code — it stops a guest at a party, it is not
+security. The backend in `server/` is where a real token is checked on every
+command.
+
+The UI itself was redesigned around this: a single hero on Home, large
+app-style titles, one white-on-black action per screen, and the bottom tab bar
+for the three places you actually go.

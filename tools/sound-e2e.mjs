@@ -4,6 +4,23 @@
  * Chromium is given a fake mic so this runs unattended.
  */
 import { chromium } from 'playwright';
+
+/** The controller is behind an id + password; first run also sets one. */
+async function signIn(page) {
+  if (!(await page.getByTestId('host-signin').count())) return;
+  await page.getByTestId('host-id').fill('admin');
+  await page.getByTestId('host-pw').fill('syncmusic');
+  await page.getByTestId('host-signin').click();
+  // first run on a fresh profile: choose the real password straight away
+  await page.waitForFunction(() =>
+    !!document.querySelector('[data-testid=save-pw],[data-testid=create-session]'), null, { timeout: 30000 });
+  if (await page.getByTestId('save-pw').count()) {
+    await page.getByTestId('new-pw').fill('syncmusic');
+    await page.getByTestId('new-pw2').fill('syncmusic');
+    await page.getByTestId('save-pw').click();
+  }
+  await page.getByTestId('create-session').waitFor({ timeout: 30000 });
+}
 const APP = process.argv[2] || 'http://localhost:9090/';
 let bad = false;
 const log = (m) => console.log(m);
@@ -37,6 +54,7 @@ if (bars < 10) fail(`the spectrum shows ${bars} bands`); else log(`✓ spectrum 
 /* ------------------------------- live mic -------------------------------- */
 const host = await page();
 await host.goto(`${APP}#/host?mode=direct`, { waitUntil: 'networkidle' });
+await signIn(host);
 await host.getByTestId('create-session').click();
 await host.getByTestId('playlist').waitFor({ timeout: 90000 });
 

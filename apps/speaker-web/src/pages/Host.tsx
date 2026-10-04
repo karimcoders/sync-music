@@ -4,6 +4,7 @@ import { P2PHostClient } from '../lib/p2p/p2pHost';
 import { detectMode, type Mode } from '../lib/mode';
 import { backendOrigin } from '../lib/backend';
 import JoinCard from '../components/JoinCard';
+import { lock } from '../lib/auth';
 import { AppBar, Artwork, Button, Card, Icons, Equalizer, Field, Logo, Meter, Row, RoundBtn, Scrubber, Shell, Stack, Status, fmtTime } from '../ui';
 
 type AnyHost = HostClient | P2PHostClient;
@@ -268,7 +269,10 @@ export default function Host({ go }: { go: (p: string) => void }) {
       )}
 
       <Button variant="danger" onClick={() => c?.end()}>END SESSION</Button>
-      <button className="chip" style={{ alignSelf: 'center' }} onClick={() => go('/')}>← Home</button>
+      <Row style={{ justifyContent: 'center', gap: 10 }}>
+        <button className="chip" onClick={() => go('/')}>← Home</button>
+        <button className="chip" data-testid="sign-out" onClick={() => { lock(); go('/'); }}>Sign out</button>
+      </Row>
       <div className="footer-note">build {__BUILD__}</div>
     </Shell>
   );
