@@ -95,19 +95,31 @@ const probe = (p) => p.evaluate(() => {
   const samples = await speakers[0].evaluate(async () => {
     const out = [];
     for (let i = 0; i < 40; i++) {
-      out.push([performance.now(), window.__syncAudio?.currentTime ?? 0]);
+      out.push([performance.now(), window.__syncAudio?.currentTime ?? 0, window.__syncAudio?.resyncs ?? 0]);
       await new Promise((r) => setTimeout(r, 200));
     }
     return out;
   });
+  // A deliberate correction is a jump by design. What must never happen is an
+  // UNEXPLAINED one — that is the stall a listener calls "breaking up".
   let worst = 0;
   for (let i = 1; i < samples.length; i++) {
+    // A deliberate correction spans three samples: the one where playback
+    // waits for the new scheduled start, the one where the counter moves, and
+    // the one just after. Skip those; everything else must be smooth.
+    if (samples[i][2] !== samples[i - 1][2]) continue;
+    if (i > 1 && samples[i - 1][2] !== samples[i - 2][2]) continue;
+    if (i + 1 < samples.length && samples[i + 1][2] !== samples[i][2]) continue;
     const wall = (samples[i][0] - samples[i - 1][0]) / 1000;
     const played = samples[i][1] - samples[i - 1][1];
     worst = Math.max(worst, Math.abs(played - wall) * 1000);
   }
-  console.log(`  worst gap between played time and real time over 8 s: ${worst.toFixed(1)} ms`);
-  if (worst < 60) console.log(`✓ no stutter: playback tracked real time within ${worst.toFixed(0)} ms`);
+  console.log(`  worst UNEXPLAINED gap between played time and real time over 8 s: ${worst.toFixed(1)} ms`);
+  const r = await speakers[0].evaluate(() => window.__syncAudio?.resyncs ?? 0);
+  console.log(`  hard resyncs so far: ${r}`);
+  if (r > 4) fail(`the sync loop restarted playback ${r} times — that is the chopping`);
+  else console.log('✓ the sync loop is not restarting playback');
+  if (worst < 30) console.log(`✓ no stutter: playback tracked real time within ${worst.toFixed(0)} ms`);
   else fail(`playback stalled or jumped by ${worst.toFixed(0)} ms`);
 }
 

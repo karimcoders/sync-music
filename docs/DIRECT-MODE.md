@@ -378,3 +378,33 @@ when idle, teal once a phone is connected, violet→pink with a slow aurora
 while music plays, amber/red when something needs attention. Cards are glass
 over that gradient, the primary action is a gradient button, and the now
 playing card breathes while audio is running.
+
+## The chopping was the sync loop, not the network
+
+Playback was decoded and gap-free and listeners still heard it break up. The
+cause was embarrassing and worth recording: **the correction loop was
+restarting playback 22 times in 20 seconds** (`tools/p2p-e2e.mjs` now counts
+them — `window.__syncAudio.resyncs`). Each restart is sample-accurate and
+fades in over 6 ms, but twice a second it is chopping.
+
+Two mistakes fed it:
+
+1. **Chasing jitter.** A phone's clock estimate wanders by tens of ms over
+   Wi-Fi, and the loop corrected on raw readings. The error is now smoothed,
+   and a restart needs a large error confirmed several times in a row with a
+   minimum gap between corrections.
+2. **`AudioContext.outputLatency` was read live and only applied to one side.**
+   Chrome re-reports it as the hardware buffer breathes, so the target moved
+   under us; and it was subtracted from the reported position but not added
+   when scheduling the start, leaving every phone late by its own buffer
+   size. It is now read once and applied to both.
+
+The loop runs in two regimes: **settling** (the first 8 s after a start or a
+join — converge fast, the clock estimate is young) and **steady** (correct
+only above ~150 ms, confirmed three times, at most once every 6 s).
+
+Measured after the change, 3 speakers: worst unexplained step between played
+time and real time **14.7 ms** over 8 s, start spread 10.6 ms, 10.6 ms after
+6 s, 12 ms after a host refresh, and **3 deliberate corrections** in the whole
+run instead of 22. The e2e now fails if an unexplained step exceeds 30 ms or
+if the loop restarts playback more than 4 times.

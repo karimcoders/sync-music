@@ -497,6 +497,8 @@ export class P2PSpeakerClient {
         get playbackRate() { return self.audio?.playbackRate ?? 1; },
         get duration() { return self.audio?.duration ?? 0; },
         get engine() { return self.wa?.ready ? 'webaudio' : 'element'; },
+        get resyncs() { return self.resyncCount; },
+        get latency() { return self.wa?.outputLatency ?? 0; },
         get element() { return self.el; },
       };
     }
@@ -659,6 +661,7 @@ export class P2PSpeakerClient {
     // audio hardware the exact instant to begin and it obeys to the sample.
     if (this.wa?.ready) {
       const leadMs = startAt - this.clock.now() - this.outputOffsetMs;
+      this.settlingSince = Date.now();
       this.wa.scheduleStart(position, leadMs / 1000);
       this.set({ phase: 'PLAYING', playing: true });
       this.drift.reset();
@@ -710,6 +713,7 @@ export class P2PSpeakerClient {
     const target = this.targetPosition();
     void target;
     if (this.wa?.ready && this.transportPlaying) {
+      this.settlingSince = Date.now();
       this.resyncExact();
       this.set({ phase: 'PLAYING', playing: true });
       return;
@@ -814,12 +818,20 @@ export class P2PSpeakerClient {
    * reached by then. Unlike an element seek there is no re-buffering, so it is
    * the right tool for anything above a few tens of milliseconds.
    */
+  private smoothErr: number | null = null;
+  /** when playback last (re)started — the clock estimate is youngest here */
+  private settlingSince = 0;
+  resyncCount = 0;
+  private lastResyncAt = 0;
   private resyncExact() {
+    this.resyncCount++;
+    this.lastResyncAt = Date.now();
     const wa = this.wa;
     if (!wa?.ready || !this.transportPlaying) return;
     const lead = 0.06;
     wa.playbackRate = 1;
     wa.scheduleStart(this.targetPosition() + lead, lead);
+    this.smoothErr = null;
     this.drift.reset();
     this.bigErrors = 0;
   }
@@ -837,17 +849,62 @@ export class P2PSpeakerClient {
     const target = this.targetPosition();
     const err = a.currentTime - target;
 
-    // Decoded path: a reschedule is sample-accurate and does not re-buffer, so
-    // close anything audible straight away and ride the rest on a 0.3% ramp
-    // that nobody can hear.
+    // Decoded path.
+    //
+    // Restarting the source is sample-accurate, but it is still a restart: do
+    // it twice a second and the listener hears chopping — which is exactly
+    // what was happening (22 restarts in 20 s on the bench). A phone's clock
+    // estimate jitters by tens of milliseconds over Wi-Fi, so correcting on
+    // raw readings means chasing noise.
+    //
+    // So: smooth the error, then prefer the inaudible tool. A restart is the
+    // last resort — a large error, confirmed three times in a row, and never
+    // more often than once every 6 seconds.
     if (this.wa?.ready) {
-      if (Math.abs(err) > 0.03) {
-        this.resyncExact();
-        this.set({ driftMs: Math.round(err * 1000), phase: 'PLAYING', position: a.currentTime });
-        return;
+      const fresh = Date.now() - this.settlingSince < 8000;
+      this.smoothErr = this.smoothErr === null ? err
+        : this.smoothErr * (fresh ? 0.3 : 0.6) + err * (fresh ? 0.7 : 0.4);
+      const e = this.smoothErr;
+      const since = Date.now() - this.lastResyncAt;
+
+      // Two different problems, two different urgencies:
+      //  - beyond ~120 ms the phone is plainly out (it just joined, or its
+      //    clock jumped). That is already audible as an echo, so fix it after
+      //    two agreeing samples, at most once every 2.5 s.
+      //  - under that, it is slow drift: confirm three times and correct at
+      //    most once every 6 s, because the correction itself can be heard.
+      // Two regimes, because the two problems are not the same problem.
+      //
+      // SETTLING (the first 8 s after a start or a join): the clock estimate
+      // is still young and a phone can land well off the beat. Converge fast
+      // — a couple of corrections now, while the listener is still noticing
+      // the song begin, is far better than an echo that lasts a minute.
+      //
+      // STEADY: the only thing left is slow drift, measured in tens of ms per
+      // minute. Here a correction is the loudest thing in the room, so it is
+      // the last resort: a big error, confirmed, and rarely.
+      const settling = Date.now() - this.settlingSince < 8000;
+      const urgent = Math.abs(e) > (settling ? 0.05 : 0.12);
+      if (Math.abs(e) > (settling ? 0.05 : 0.15)) {
+        this.bigErrors = Math.sign(e) === Math.sign(this.lastErr) ? this.bigErrors + 1 : 1;
+        this.lastErr = e;
+        const need = settling ? 1 : urgent ? 2 : 3;
+        const gap = settling ? 900 : urgent ? 2500 : 6000;
+        if (this.bigErrors >= need && since > gap) {
+          this.resyncExact();
+          this.smoothErr = 0;
+          this.set({ driftMs: Math.round(e * 1000), phase: 'PLAYING', position: a.currentTime });
+          return;
+        }
+      } else {
+        this.bigErrors = 0;
       }
-      a.playbackRate = Math.abs(err) < 0.008 ? 1 : (err > 0 ? 0.997 : 1.003);
-      this.set({ position: a.currentTime, driftMs: Math.round(err * 1000), phase: 'PLAYING' });
+
+      // Proportional, capped at 0.5%: closes 100 ms in about 20 s without a
+      // pitch change anyone can hear, and never interrupts the waveform.
+      const rate = Math.abs(e) < 0.012 ? 1 : 1 - Math.max(-0.005, Math.min(0.005, e * 0.05));
+      a.playbackRate = rate;
+      this.set({ position: a.currentTime, driftMs: Math.round(e * 1000), phase: 'PLAYING' });
       return;
     }
     // Safety net above the normal policy: a phone that is more than ~120 ms

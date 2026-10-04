@@ -67,15 +67,26 @@ export class WebAudioPlayer {
    * time means the drift loop lines up what people actually hear, not what
    * was queued — on phones with different buffer sizes that is tens of ms.
    */
+  private frozenLatency: number | null = null;
   get outputLatency(): number {
-    const c = this.ctx as any;
-    const l = Number(c.outputLatency ?? c.baseLatency ?? 0);
-    return Number.isFinite(l) && l >= 0 && l < 0.5 ? l : 0;
+    // Read ONCE. Chrome on Android re-reports this value as the buffer
+    // breathes, and feeding that jitter into the position would make the sync
+    // loop chase a moving target — which is heard as chopping.
+    if (this.frozenLatency === null) {
+      const c = this.ctx as any;
+      const l = Number(c.outputLatency ?? c.baseLatency ?? 0);
+      this.frozenLatency = Number.isFinite(l) && l >= 0 && l < 0.5 ? l : 0;
+    }
+    return this.frozenLatency;
   }
 
   get currentTime(): number {
     if (this.stopped || !this.buffer) return this.pending;
-    const t = this.baseOffset + (this.ctx.currentTime - this.baseCtxTime - this.outputLatency) * this.rate;
+    // Before a scheduled start actually fires, the song is still sitting at
+    // its start position — reporting a negative elapsed time would look like
+    // playback running backwards.
+    const elapsed = this.ctx.currentTime - this.baseCtxTime - this.outputLatency;
+    const t = this.baseOffset + Math.max(0, elapsed) * this.rate;
     return Math.max(0, Math.min(t, this.buffer.duration));
   }
 
@@ -126,11 +137,18 @@ export class WebAudioPlayer {
    */
   scheduleStart(position: number, leadSeconds: number) {
     if (!this.buffer) return;
-    if (leadSeconds <= 0) {
-      this.startFrom(position - leadSeconds, this.ctx.currentTime);
+    // Queueing audio at context time T means it is AUDIBLE at T + latency, so
+    // to be heard on time we must queue it that much earlier. Positions are
+    // reported in audible time for the same reason; doing one without the
+    // other leaves every phone late by its own buffer size, which is exactly
+    // the kind of fixed per-device error that shows up as phones not being
+    // together.
+    const lead = leadSeconds - this.outputLatency;
+    if (lead <= 0) {
+      this.startFrom(position - lead, this.ctx.currentTime);
       return;
     }
-    this.startFrom(position, this.ctx.currentTime + leadSeconds);
+    this.startFrom(position, this.ctx.currentTime + lead);
   }
 
   pause() {
