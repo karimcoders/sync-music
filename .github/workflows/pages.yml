@@ -30,7 +30,7 @@ jobs:
           VITE_BASE: /${{ github.event.repository.name }}/
         run: npm run build -w @sync-music/speaker-web
       - name: SPA fallback
-        run: cp apps/speaker-web/dist/index.html apps/speaker-web/dist/404.html
+        run: test -f apps/speaker-web/dist/404.html  # shipped from public/: it maps /speaker and /host onto the hash routes
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with: { path: apps/speaker-web/dist }
