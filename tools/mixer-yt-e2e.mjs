@@ -21,8 +21,10 @@ const page = async () => (await b.newContext()).newPage();
   const p = await page();
   await p.goto(`${APP}#/speaker?mode=direct`, { waitUntil: 'networkidle' });
   await p.waitForTimeout(1200);
-  await p.getByTestId('enable-speaker').click({ timeout: 30000 });
-  await p.waitForFunction(() => !!window.__syncWA, null, { timeout: 20000 });
+  // the page shows either an explicit button or a tap-anywhere overlay
+  await p.locator('body').click();
+  if (await p.getByTestId('enable-speaker').count()) await p.getByTestId('enable-speaker').click();
+  await p.waitForFunction(() => !!window.__syncWA, null, { timeout: 30000 });
   await p.waitForTimeout(800);
 
   // feed a known 80 Hz tone through the music channel strip and measure it
@@ -88,7 +90,8 @@ const page = async () => (await b.newContext()).newPage();
     const p = await page();
     await p.goto(`${APP}#/speaker?mode=direct`, { waitUntil: 'networkidle' });
     await p.waitForTimeout(1200);
-    await p.getByTestId('enable-speaker').click({ timeout: 30000 });
+    await p.locator('body').click();
+    if (await p.getByTestId('enable-speaker').count()) await p.getByTestId('enable-speaker').click();
     sps.push(p);
   }
   await host.waitForTimeout(5000);
