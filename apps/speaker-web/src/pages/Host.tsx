@@ -4,7 +4,7 @@ import { P2PHostClient } from '../lib/p2p/p2pHost';
 import { detectMode, type Mode } from '../lib/mode';
 import { backendOrigin } from '../lib/backend';
 import JoinCard from '../components/JoinCard';
-import { Artwork, Button, Card, Icons, Equalizer, Field, Logo, Meter, Row, RoundBtn, Scrubber, Shell, Stack, Status, fmtTime } from '../ui';
+import { AppBar, Artwork, Button, Card, Icons, Equalizer, Field, Logo, Meter, Row, RoundBtn, Scrubber, Shell, Stack, Status, fmtTime } from '../ui';
 
 type AnyHost = HostClient | P2PHostClient;
 
@@ -54,8 +54,8 @@ export default function Host({ go }: { go: (p: string) => void }) {
   /* ----------------------------- no session ---------------------------- */
   if (!s.sessionId) {
     return (
-      <Shell>
-        <Logo sub="Host" />
+      <Shell tab="host" go={go}>
+        <AppBar title="Player" sub="Host" />
         <Card>
           <Stack gap={14}>
             <h1>Start a session</h1>
@@ -96,8 +96,8 @@ export default function Host({ go }: { go: (p: string) => void }) {
 
   /* ------------------------------- live -------------------------------- */
   return (
-    <Shell>
-      <Logo sub={s.sessionName || 'Host'} />
+    <Shell tab="host" go={go}>
+      <AppBar title={s.sessionName || 'Player'} sub="Host" />
 
       <Card>
         <Row>

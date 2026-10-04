@@ -29,6 +29,8 @@ export interface UiState {
   bufferedPct: number;
   error: string | null;
   info: string | null;
+  /** the host's live microphone is coming through right now */
+  hostMic?: boolean;
 }
 
 const DEVICE_KEY = 'sync-music.deviceId';

@@ -232,3 +232,23 @@ Two other things that matter for how it sounds, learned by measuring:
 * **Four room slots, dialled together.** A phone that negotiates a dozen ICE
   sessions at once spends its CPU and radio on that instead of on smooth
   playback; four is enough to step over ids the broker is still holding.
+
+## Black-and-white app shell, a microphone that actually plays, no more ticking
+
+Three fixes after testing on a real phone:
+
+1. **The live microphone was silent on Android.** The music element is unlocked
+   by the ENABLE SPEAKER tap, but the microphone arrived later in its own,
+   never-unlocked `<audio>` — and Android blocks that. The speaker now unlocks
+   a second element inside the same tap and only swaps the stream into it
+   later, retrying once on the next touch if the browser still refuses. The
+   speaker also shows a pulsing **Host is speaking** banner so it is obvious.
+2. **The stutter was our own correction loop.** A phone's clock estimate
+   jitters, so a single bad sample above the 120 ms threshold caused a seek —
+   and a seek is an audible tick. Repeated, that is the "ruk ruk". A seek now
+   needs **three consecutive readings that agree**; in between the speaker
+   leans on a ±2 % playback-rate nudge, which nobody can hear.
+3. **The UI is a black-and-white phone app.** One flat palette (black, white,
+   grey — brightness carries the meaning, which survives sunlight on a cheap
+   screen), a bottom tab bar (PLAYER / SPEAKER / SOUND), large app-style
+   titles, greyscale artwork and white transport controls.

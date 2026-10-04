@@ -5,7 +5,7 @@ import { detectMode, roomParam, type Mode } from '../lib/mode';
 import { FIXED_ROOM_ID, roomIdFromCode } from '../lib/p2p/messages';
 import QrScanner from '../components/QrScanner';
 import { backendOrigin, setBackend } from '../lib/backend';
-import { Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime, Icons } from '../ui';
+import { AppBar, Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime, Icons } from '../ui';
 
 type Discovered = { sessionId: string; name: string; speakerCount: number; hostOnline: boolean };
 
@@ -64,8 +64,8 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
 
   if (!room && mode === 'direct') {
     return (
-      <Shell>
-        <Logo sub="Speaker" />
+      <Shell tab="speaker" go={go}>
+        <AppBar title="Speaker" sub="This phone" />
         <Card>
           <Stack gap={14} style={{ alignItems: 'center', textAlign: 'center' }}>
             <div className="hero-emoji">📷</div>
@@ -110,8 +110,8 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
   /* -------------------------- looking for a host ------------------------ */
   if (!s.sessionId) {
     return (
-      <Shell>
-        <Logo sub="Speaker" />
+      <Shell tab="speaker" go={go}>
+        <AppBar title="Speaker" sub="This phone" />
         <Card>
           <Stack gap={14} style={{ alignItems: 'center', textAlign: 'center' }}>
             <div className="hero-emoji">{failed ? '📡' : searching ? '🔎' : sessions.length ? '🎧' : '🎧'}</div>
@@ -174,7 +174,7 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
   /* ------------------------------ attached ------------------------------ */
   const enabled = c?.isAudioEnabled;
   return (
-    <Shell>
+    <Shell tab="speaker" go={go}>
       <Logo sub={s.sessionName || 'Speaker'} />
 
       <Card>
@@ -225,6 +225,15 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
               {s.clockSynced ? `${Math.round(s.latencyMs)}ms` : '…'} · drift {s.driftMs}ms
             </span>
           </Row>
+          {s.hostMic && (
+            <div className="mic-live" data-testid="host-mic">
+              <span className="dot" />
+              <div>
+                <div style={{ fontWeight: 700 }}>Host is speaking</div>
+                <div className="tiny">Live microphone — it plays on top of the music.</div>
+              </div>
+            </div>
+          )}
           {s.muted && <div className="warn-text center" style={{ marginTop: 10 }}>Muted by the host</div>}
           {c instanceof P2PSpeakerClient && (
             <>

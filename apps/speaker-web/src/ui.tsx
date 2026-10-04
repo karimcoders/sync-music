@@ -2,8 +2,47 @@ import type { CSSProperties, ReactNode } from 'react';
 
 /* A tiny design system so the host and speaker screens feel like one product. */
 
-export function Shell({ children }: { children: ReactNode }) {
-  return <div className="shell">{children}</div>;
+export function Shell({ children, tab, go }: { children: ReactNode; tab?: TabKey; go?: (p: string) => void }) {
+  return (
+    <>
+      <div className="shell">{children}</div>
+      {tab && go && <TabBar tab={tab} go={go} />}
+    </>
+  );
+}
+
+export type TabKey = 'host' | 'speaker' | 'sound';
+
+/** Bottom navigation, the way a phone app does it. */
+export function TabBar({ tab, go }: { tab: TabKey; go: (p: string) => void }) {
+  const items: Array<{ key: TabKey; path: string; label: string; icon: ReactNode }> = [
+    { key: 'host', path: '/host', label: 'PLAYER', icon: Icons.play },
+    { key: 'speaker', path: '/speaker', label: 'SPEAKER', icon: Icons.speaker },
+    { key: 'sound', path: '/sound', label: 'SOUND', icon: Icons.meter },
+  ];
+  return (
+    <nav className="tabbar">
+      {items.map((i) => (
+        <button key={i.key} className={tab === i.key ? 'on' : ''} onClick={() => go(i.path)}>
+          {i.icon}
+          <span>{i.label}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+/** Large app-style title bar. */
+export function AppBar({ title, sub, right }: { title: string; sub?: string; right?: ReactNode }) {
+  return (
+    <header className="appbar">
+      <div>
+        {sub && <div className="sub">{sub}</div>}
+        <h1>{title}</h1>
+      </div>
+      {right}
+    </header>
+  );
 }
 
 export function Logo({ sub }: { sub?: string }) {
@@ -125,6 +164,8 @@ export const Icons = {
   prev: svg(<path d="M7 5h2.4v14H7V5Zm12 .8v12.4L10 12l9-6.2Z" />),
   next: svg(<path d="M14.6 5H17v14h-2.4V5ZM5 5.8 14 12l-9 6.2V5.8Z" />),
   resync: svg(<path d="M12 5a7 7 0 1 0 6.3 3.9l1.7-.9A9 9 0 1 1 12 3v2Zm0-3 4 3-4 3V2Z" />),
+  meter: svg(<path d="M12 4a8 8 0 0 1 7.5 10.8l-1.9-.7A6 6 0 1 0 6.4 14l-1.9.7A8 8 0 0 1 12 4Zm0 4 3.4 4.2a2.2 2.2 0 1 1-3.4-.2V8Z" />),
+  mic: svg(<path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Zm-6 8h2a4 4 0 0 0 8 0h2a6 6 0 0 1-5 5.9V20h-2v-3.1A6 6 0 0 1 6 11Z" />),
   speaker: svg(<path d="M4 9.5h3.2L12 5.5v13L7.2 14.5H4v-5Zm11.2-1.1a5 5 0 0 1 0 7.2l-1.3-1.3a3.2 3.2 0 0 0 0-4.6l1.3-1.3Zm2.4-2.5a8.4 8.4 0 0 1 0 12.2l-1.3-1.3a6.6 6.6 0 0 0 0-9.6l1.3-1.3Z" />),
 };
 

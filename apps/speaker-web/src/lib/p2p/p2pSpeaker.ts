@@ -214,18 +214,24 @@ export class P2PSpeakerClient {
       this.micAudio = a;
     }
     this.micAudio.srcObject = stream;
+    this.micAudio.muted = false;
     this.micAudio.volume = this.state.volume ?? 1;
     void this.micAudio.play().catch(() => {
       this.set({ info: 'Tap the screen once to let the host\u2019s microphone through.' });
+      const retry = () => {
+        void this.micAudio?.play().then(() => this.set({ info: 'The host is speaking live.' })).catch(() => {});
+        document.removeEventListener('pointerdown', retry);
+      };
+      document.addEventListener('pointerdown', retry);
     });
-    this.set({ info: 'The host is speaking live.' });
+    this.set({ info: 'The host is speaking live.', hostMic: true });
   }
 
   private stopMic() {
     if (!this.micAudio) return;
     try { this.micAudio.pause(); } catch {}
     this.micAudio.srcObject = null;
-    this.set({ info: null });
+    this.set({ info: null, hostMic: false });
   }
 
   private startChunkChase() {
@@ -435,6 +441,19 @@ export class P2PSpeakerClient {
       this.audio.pause();
       this.audio.currentTime = 0;
       this.audio.muted = false;
+      // Unlock a SECOND element in the same gesture: Android blocks a fresh
+      // <audio> created later, which is why the host's live microphone was
+      // silent on a real phone even though the track arrived.
+      if (!this.micAudio) {
+        const m = new Audio();
+        (m as any).playsInline = true;
+        m.autoplay = true;
+        m.muted = true;
+        m.src = SILENT_WAV;
+        try { await m.play(); m.pause(); } catch { /* best effort */ }
+        m.muted = false;
+        this.micAudio = m;
+      }
       this.audioEnabled = true;
       this.keepPlayingWhenLocked();
       this.set({ phase: 'AUDIO_READY', error: null, info: null });
@@ -603,6 +622,8 @@ export class P2PSpeakerClient {
   }
 
   private wakeLock: any = null;
+  private bigErrors = 0;
+  private lastErr = 0;
 
   private startReporting() {
     const report = () => {
@@ -638,13 +659,27 @@ export class P2PSpeakerClient {
     // out is plainly audible as an echo, and nudging playbackRate would take
     // tens of seconds to close that. Snap it, then let the gentle loop keep it
     // there. (Below this the policy still prefers an inaudible rate change.)
+    // A phone's clock estimate jitters, especially on mobile data. Snapping on
+    // a single bad sample is audible as a tick, and repeated ticks are exactly
+    // the "ruk ruk" stutter. So a seek needs THREE consecutive readings that
+    // agree, and in between we lean on the (inaudible) rate change.
     if (Math.abs(err) > 0.12) {
-      try { a.currentTime = target; } catch {}
-      a.playbackRate = 1;
+      this.bigErrors = Math.sign(err) === Math.sign(this.lastErr) ? this.bigErrors + 1 : 1;
+      this.lastErr = err;
+      if (this.bigErrors >= 3) {
+        this.bigErrors = 0;
+        try { a.currentTime = target; } catch {}
+        a.playbackRate = 1;
+        this.set({ position: a.currentTime, driftMs: Math.round(err * 1000), phase: 'PLAYING' });
+        this.updateBuffered();
+        return;
+      }
+      a.playbackRate = err > 0 ? 0.98 : 1.02;     // pull back gently meanwhile
       this.set({ position: a.currentTime, driftMs: Math.round(err * 1000), phase: 'PLAYING' });
       this.updateBuffered();
       return;
     }
+    this.bigErrors = 0;
     const c = this.drift.evaluate(a.currentTime, target);
     if (c.action === 'rate') a.playbackRate = c.rate;
     if (c.action === 'seek') { a.currentTime = c.targetPosition; a.playbackRate = 1; }

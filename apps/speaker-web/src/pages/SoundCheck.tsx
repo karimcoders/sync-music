@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Button, Card, Logo, Row, Shell, Stack } from '../ui';
+import { AppBar, Button, Card, Row, Shell, Stack } from '../ui';
 
 /**
  * Sound Check — a phone-based diagnostic toolkit.
@@ -240,8 +240,8 @@ export default function SoundCheck({ go }: { go: (p: string) => void }) {
     : null;
 
   return (
-    <Shell>
-      <Logo sub="Sound check" />
+    <Shell tab="sound" go={go}>
+      <AppBar title="Sound check" sub="Mic tools" />
 
       <Card>
         <Stack gap={12}>

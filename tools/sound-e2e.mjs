@@ -58,6 +58,9 @@ const micState = await sp.evaluate(() => {
   return { have: !!s, live: !!s && s.getAudioTracks().some((t) => t.readyState === 'live'), paused: a?.paused };
 });
 log(`  speaker mic stream: ${JSON.stringify(micState)}`);
+const banner = await sp.getByTestId('host-mic').count();
+if (!banner) fail('the speaker does not show that the host is live');
+else log('✓ the speaker shows a "Host is speaking" banner');
 if (!micState.have) fail('the host microphone never reached the speaker');
 else if (!micState.live) fail('the speaker received a microphone track that is not live');
 else log('✓ the host microphone is live on the speaker');
