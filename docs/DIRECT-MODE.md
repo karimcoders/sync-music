@@ -652,3 +652,18 @@ Honest limits, all of them:
 * if there is no token, no network, or the upload fails, nothing breaks: the
   phone-to-phone transfer is still running underneath.
 * `tools/cloud-e2e.mjs <url> [token]` reproduces the table above.
+
+### One uplink, one job at a time
+
+The first version of the cloud shortcut uploaded to GitHub *while* also
+pushing the same megabytes to every speaker over WebRTC. Both halves were
+competing for the same single uplink on the host phone, so both were slow.
+
+Now, when cloud delivery is on, the host uploads once and stops there. The
+phones fetch it themselves. A backstop runs a few seconds later: any phone
+that still has not confirmed it holds the song — no internet, GitHub blocked,
+upload failed — gets the file pushed to it the old way. Late, but certain.
+
+Bench, three phones, 5 MB song, "added" → "phone holds it": typically
+**2.5–3.5 s** per phone with one straggler at 6–8 s, against a 9.8 s slowest
+before any of this work.

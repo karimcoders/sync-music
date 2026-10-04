@@ -595,9 +595,25 @@ export class P2PHostClient {
       this.set({ info: 'Cloud copy ready — phones download it directly.' });
       this.conns.forEach((c) => this.sendUrl(c.conn, trackId));
     } catch (e: any) {
-      // Never fatal: the phone-to-phone path is still running.
-      this.set({ error: `Cloud upload failed (${e?.message || 'unknown'}). Phones will get the song the slow way.` });
+      // Never fatal: fall straight back to the phone-to-phone path.
+      this.set({ error: `Cloud upload failed (${e?.message || 'unknown'}). Sending it to the phones directly instead.` });
+      await Promise.all([...this.conns.keys()].map((p) => this.enqueueTrack(p, trackId, { urgent: true })));
     }
+  }
+
+  /**
+   * The safety net behind the cloud copy.
+   *
+   * A phone may be on a network that cannot reach GitHub, or the upload may
+   * have failed. After a grace period anyone who still has not confirmed the
+   * song gets it the old way — late, but certain.
+   */
+  private async backstopTransfer(trackId: string, graceMs = 6000) {
+    await new Promise((r) => setTimeout(r, graceMs));
+    const missing = [...this.conns.entries()].filter(([, c]) => !c.have.has(trackId));
+    if (!missing.length) return;
+    this.set({ info: `${missing.length} phone(s) could not fetch it — sending directly.` });
+    await Promise.all(missing.map(([p]) => this.enqueueTrack(p, trackId, { urgent: true })));
   }
 
   private sendUrl(conn: DataConnection, trackId: string) {
@@ -630,11 +646,21 @@ export class P2PHostClient {
       this.conns.forEach((_c, p) => this.prefetch(p));
       if (this.transport.trackIndex < 0) this.transport = { ...this.transport, trackIndex: 0, trackId: id };
       this.pushTransport();
-      // The cloud copy is the fast path; start it first and do not wait for it.
-      void this.publishToCloud(id);
-      this.set({ info: `Sending “${track.title}” to ${this.conns.size} phone(s)…` });
       this.hintNext();
-      await Promise.all([...this.conns.keys()].map((p) => this.enqueueTrack(p, id)));
+      if (this.cloud) {
+        // Do ONE thing at a time with this phone's uplink. Uploading to the
+        // cloud while also pushing the same megabytes to every speaker made
+        // both slower — they were splitting the same connection. So: upload
+        // once, let the phones pull it themselves, and only fall back to the
+        // phone-to-phone push for whoever still has not got it.
+        this.set({ info: `Uploading “${track.title}” once…` });
+        await this.publishToCloud(id);
+        this.set({ info: 'Phones are downloading it directly.' });
+        void this.backstopTransfer(id);
+      } else {
+        this.set({ info: `Sending “${track.title}” to ${this.conns.size} phone(s)…` });
+        await Promise.all([...this.conns.keys()].map((p) => this.enqueueTrack(p, id)));
+      }
       this.set({ info: 'Ready' });
     } catch (e: any) {
       this.set({ error: e?.message || 'Could not read that file.' });
@@ -765,8 +791,18 @@ export class P2PHostClient {
       this.transport.playlist[this.transport.trackIndex],
       ...this.transport.playlist,
     ].filter(Boolean) as AudioTrack[];
-    // the song that is playing jumps the queue; the rest fills in behind it
-    order.forEach((t, i) => void this.enqueueTrack(peerId, t.id, { urgent: i === 0 }));
+    const c = this.conns.get(peerId);
+    order.forEach((t, i) => {
+      // already in the cloud? the phone fetches it itself, far faster than we
+      // could push it, and the backstop covers a phone that cannot.
+      if (this.urls.has(t.id)) {
+        if (c) this.sendUrl(c.conn, t.id);
+        void this.backstopTransfer(t.id, i === 0 ? 8000 : 20000);
+        return;
+      }
+      // the song that is playing jumps the queue; the rest fills in behind it
+      void this.enqueueTrack(peerId, t.id, { urgent: i === 0 });
+    });
   }
 
   private async sendTrack(peerId: string, trackId?: string, force = false) {
