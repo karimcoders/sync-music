@@ -358,3 +358,23 @@ Honest limits: decoding holds the song as PCM, roughly 10 MB per minute, so a
 very long track on a very old phone can be refused — that phone falls back to
 the element. And no browser gives us the true speaker-to-air delay, so the
 per-phone nudge in Settings is still the last word if one phone echoes.
+
+## Two more changes: silence beats a stutter, and colour says what is happening
+
+**The element never makes audible sound any more.** It stutters — that is why
+the decoded player exists — so if a song has not finished decoding when PLAY
+arrives, the phone now stays quiet and says *"Preparing the song on this
+phone — it will join in a moment"*, then joins exactly on the timeline. A
+short, honest wait instead of broken audio.
+
+**A suspended AudioContext is silence, and Android suspends it** when the
+screen goes off or the system takes audio focus. We now watch for that on
+`visibilitychange`, on focus and every 2 s, resume it and land back on the
+timeline.
+
+**The UI is in colour again, and the colour is the status.** You cannot read a
+status line from across a room, so the whole screen changes mood: cool indigo
+when idle, teal once a phone is connected, violet→pink with a slow aurora
+while music plays, amber/red when something needs attention. Cards are glass
+over that gradient, the primary action is a gradient button, and the now
+playing card breathes while audio is running.

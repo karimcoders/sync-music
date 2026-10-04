@@ -5,12 +5,18 @@ import { detectMode, roomParam, type Mode } from '../lib/mode';
 import { FIXED_ROOM_ID, roomIdFromCode } from '../lib/p2p/messages';
 import QrScanner from '../components/QrScanner';
 import { backendOrigin, setBackend } from '../lib/backend';
-import { AppBar, Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime, Icons } from '../ui';
+import { AppBar, Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime, Icons , useMood } from '../ui';
 
 type Discovered = { sessionId: string; name: string; speakerCount: number; hostOnline: boolean };
 
 export default function Speaker({ go }: { go: (p: string) => void }) {
   const [s, setS] = useState<UiState | null>(null);
+  // the screen's colour says what is happening, readable from across a room
+  useMood(
+    !s || s.conn === 'disconnected' ? 'idle'
+      : s.error || s.conn === 'reconnecting' ? 'trouble'
+      : s.playing ? 'playing' : 'connected',
+  );
   const [sessions, setSessions] = useState<Discovered[]>([]);
   const [searching, setSearching] = useState(true);
   const [failed, setFailed] = useState(false);

@@ -478,3 +478,132 @@ input[type=text]:focus, input[type=url]:focus, input[type=password]:focus {
   border: 1px solid var(--line); color: #fff;
 }
 .lock-badge svg { width: 30px; height: 30px; }
+
+/* ============================================================== COLOUR
+   The monochrome block above stays as the base layout; everything below
+   repaints it. Colour is not decoration here — it is the fastest way to tell
+   somebody across a room what the app is doing, so the whole screen changes
+   mood with the connection:
+
+     idle       cool indigo, calm
+     connected  teal/green aurora, alive
+     playing    violet → pink, moving with the music
+     trouble    amber/red
+
+   Light stays off black so it is still readable outdoors and still cheap on
+   an OLED battery. */
+:root {
+  --h1: 258;            /* primary hue   */
+  --h2: 318;            /* secondary hue */
+  --bg: #07060f;
+  --bg2: #0d0a1c;
+  --card: rgba(255, 255, 255, .055);
+  --line: rgba(255, 255, 255, .13);
+  --fg: #f6f4ff;
+  --dim: #a9a3c7;
+  --accent: hsl(var(--h1) 95% 68%);
+  --accent2: hsl(var(--h2) 90% 66%);
+  --ok: #3ddc97;
+  --warn: #ffc857;
+  --err: #ff6b7a;
+}
+body[data-mood='connected'] { --h1: 168; --h2: 196; }
+body[data-mood='playing']   { --h1: 268; --h2: 322; }
+body[data-mood='trouble']   { --h1: 22;  --h2: 348; }
+
+body {
+  background:
+    radial-gradient(90vw 60vh at 12% -10%, hsl(var(--h1) 85% 32% / .55), transparent 60%),
+    radial-gradient(80vw 55vh at 92% 8%, hsl(var(--h2) 85% 34% / .45), transparent 62%),
+    radial-gradient(70vw 50vh at 50% 108%, hsl(var(--h1) 80% 30% / .40), transparent 60%),
+    linear-gradient(180deg, var(--bg2), var(--bg) 55%);
+  background-attachment: fixed;
+  transition: background 900ms ease;
+}
+body[data-mood='playing']::before {
+  /* a slow aurora that only breathes while music is actually playing */
+  content: ''; position: fixed; inset: -20vh -20vw; pointer-events: none; z-index: 0;
+  background: radial-gradient(40vw 40vh at 30% 40%, hsl(var(--h2) 90% 55% / .18), transparent 60%);
+  animation: aurora 9s ease-in-out infinite alternate;
+}
+@keyframes aurora { to { transform: translate3d(14vw, -8vh, 0) scale(1.15); opacity: .7; } }
+.shell { position: relative; z-index: 1; }
+
+.card {
+  background: linear-gradient(180deg, rgba(255,255,255,.085), rgba(255,255,255,.03));
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 18px 40px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.08);
+}
+.card.hero {
+  border-color: hsl(var(--h1) 90% 70% / .35);
+  box-shadow: 0 24px 60px hsl(var(--h1) 90% 20% / .6), inset 0 1px 0 rgba(255,255,255,.12);
+}
+
+.btn.primary, .btn:not(.ghost):not(.danger) {
+  background: linear-gradient(135deg, hsl(var(--h1) 92% 62%), hsl(var(--h2) 92% 60%));
+  color: #0a0714; border: 0; font-weight: 800; letter-spacing: .04em;
+  box-shadow: 0 10px 24px hsl(var(--h1) 90% 45% / .38);
+}
+.btn.ghost {
+  background: rgba(255,255,255,.06); color: var(--fg);
+  border: 1px solid hsl(var(--h1) 80% 70% / .3);
+}
+.btn.danger { background: rgba(255,107,122,.12); color: var(--err); border: 1px solid rgba(255,107,122,.45); }
+
+.chip { border: 1px solid var(--line); color: var(--fg); background: rgba(255,255,255,.05); }
+.chip.active {
+  background: linear-gradient(135deg, hsl(var(--h1) 92% 62%), hsl(var(--h2) 92% 60%));
+  color: #0a0714; border-color: transparent; font-weight: 700;
+}
+
+.round.lg {
+  background: linear-gradient(135deg, hsl(var(--h1) 92% 64%), hsl(var(--h2) 92% 60%));
+  color: #0a0714; box-shadow: 0 12px 30px hsl(var(--h1) 90% 45% / .45);
+}
+.round { background: rgba(255,255,255,.1); color: var(--fg); }
+
+.scrub-track i, .meter .pos, .spec-col i {
+  background: linear-gradient(90deg, hsl(var(--h1) 92% 65%), hsl(var(--h2) 92% 64%)) !important;
+}
+input[type=range] { accent-color: hsl(var(--h1) 92% 65%); }
+
+.status.ok  { color: var(--ok);  border-color: rgba(61,220,151,.4);  background: rgba(61,220,151,.12); }
+.status.warn{ color: var(--warn);border-color: rgba(255,200,87,.4);  background: rgba(255,200,87,.12); }
+.status.err { color: var(--err); border-color: rgba(255,107,122,.4); background: rgba(255,107,122,.12); }
+
+.logo-mark span, .hero-art span {
+  background: linear-gradient(180deg, hsl(var(--h1) 95% 72%), hsl(var(--h2) 95% 66%));
+}
+.hero-title {
+  background: linear-gradient(120deg, #fff, hsl(var(--h2) 95% 78%));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+.tabbar {
+  background: linear-gradient(180deg, rgba(14,10,28,.72), rgba(7,6,15,.95));
+  border-top: 1px solid var(--line);
+  backdrop-filter: blur(18px);
+}
+.tabbar button.on { color: hsl(var(--h1) 95% 74%); }
+.tabbar button.on::after {
+  background: linear-gradient(90deg, hsl(var(--h1) 95% 66%), hsl(var(--h2) 95% 66%));
+  width: 22px; height: 3px;
+}
+.lock-btn { border-color: var(--line); color: var(--dim); background: rgba(255,255,255,.05); }
+.lock-badge { border-color: hsl(var(--h1) 90% 70% / .4); color: hsl(var(--h1) 95% 78%); }
+
+/* a live phone gets a ring that pulses with the beat of the connection */
+.mic-live {
+  border-color: hsl(var(--h2) 90% 65% / .5);
+  background: hsl(var(--h2) 90% 55% / .14);
+}
+body[data-mood='playing'] .card.now-playing,
+body[data-mood='connected'] .card.now-playing {
+  border-color: hsl(var(--h1) 90% 70% / .45);
+  animation: breathe 3.2s ease-in-out infinite;
+}
+@keyframes breathe {
+  50% { box-shadow: 0 18px 50px hsl(var(--h1) 90% 45% / .5), inset 0 1px 0 rgba(255,255,255,.12); }
+}

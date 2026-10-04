@@ -5,12 +5,13 @@ import { detectMode, type Mode } from '../lib/mode';
 import { backendOrigin } from '../lib/backend';
 import JoinCard from '../components/JoinCard';
 import { lock } from '../lib/auth';
-import { AppBar, Artwork, Button, Card, Icons, Equalizer, Field, Logo, Meter, Row, RoundBtn, Scrubber, Shell, Stack, Status, fmtTime } from '../ui';
+import { AppBar, Artwork, Button, Card, Icons, Equalizer, Field, Logo, Meter, Row, RoundBtn, Scrubber, Shell, Stack, Status, fmtTime , useMood } from '../ui';
 
 type AnyHost = HostClient | P2PHostClient;
 
 export default function Host({ go }: { go: (p: string) => void }) {
   const [s, setS] = useState<HostState | null>(null);
+  useMood(!s?.sessionId ? 'idle' : s.error ? 'trouble' : s.transport?.state === 'playing' ? 'playing' : 'connected');
   const [mode, setMode] = useState<Mode | null>(null);
   const ref = useRef<AnyHost | null>(null);
   const [name, setName] = useState('My Music');

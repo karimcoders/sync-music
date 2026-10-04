@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 
 /* A tiny design system so the host and speaker screens feel like one product. */
@@ -201,3 +202,18 @@ export const fmtTime = (s: number) => {
   const v = Number.isFinite(s) && s > 0 ? Math.floor(s) : 0;
   return `${String(Math.floor(v / 60)).padStart(2, '0')}:${String(v % 60).padStart(2, '0')}`;
 };
+
+
+/**
+ * Paint the whole app with what it is doing.
+ *
+ * Across a room you cannot read a status line, but you can see a colour: the
+ * background drifts to teal when a phone is connected, to violet/pink while
+ * music is playing, and to amber when something needs attention.
+ */
+export function useMood(mood: 'idle' | 'connected' | 'playing' | 'trouble') {
+  useEffect(() => {
+    document.body.dataset.mood = mood;
+    return () => { delete document.body.dataset.mood; };
+  }, [mood]);
+}

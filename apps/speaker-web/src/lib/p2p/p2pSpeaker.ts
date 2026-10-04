@@ -579,7 +579,7 @@ export class P2PSpeakerClient {
         if (this.transportPlaying && this.audioEnabled) {
           try { this.el?.pause(); } catch {}
           this.resyncExact();
-          this.set({ phase: 'PLAYING', playing: true });
+          this.set({ phase: 'PLAYING', playing: true, info: null });
         }
         this.applyVolume();
       })
@@ -644,6 +644,14 @@ export class P2PSpeakerClient {
   private schedulePlay(position: number, startAt: number) {
     const a = this.audio;
     if (!a) return;
+    // The element stutters — that is the whole reason the decoded player
+    // exists. So if the song is not decoded yet we stay SILENT and say so,
+    // rather than producing the broken sound and "fixing" it later.
+    if (this.wa && !this.wa.ready) {
+      this.decodeForExactPlayback();
+      this.set({ phase: 'SYNCING', info: 'Preparing the song on this phone — it will join in a moment.' });
+      return;
+    }
     if (this.playTimer) window.clearTimeout(this.playTimer);
     this.set({ phase: 'SYNCING' });
 
@@ -692,6 +700,11 @@ export class P2PSpeakerClient {
   private catchUp() {
     const a = this.audio;
     if (!a || !this.audioEnabled) return;
+    if (this.wa && !this.wa.ready) {
+      this.decodeForExactPlayback();
+      this.set({ phase: 'SYNCING', info: 'Preparing the song on this phone — it will join in a moment.' });
+      return;
+    }
     const untilStart = this.baseHostTime - this.clock.now();
     if (this.transportPlaying && untilStart > 20) { this.schedulePlay(this.basePosition, this.baseHostTime); return; }
     const target = this.targetPosition();
@@ -719,7 +732,28 @@ export class P2PSpeakerClient {
    * stops a phone from suspending Wi-Fi mid-song. The honest limit: the tab
    * must stay open, and some battery savers will still stop it.
    */
+  /**
+   * Android suspends an AudioContext when the screen goes off or the system
+   * takes the audio focus, and a suspended context is simply silence. Watch
+   * for it and bring it back, then land exactly back on the timeline.
+   */
+  private keepContextAwake() {
+    const revive = () => {
+      const ctx = this.ctx;
+      if (!ctx || !this.audioEnabled) return;
+      if (ctx.state !== 'running') {
+        void ctx.resume()
+          .then(() => { if (this.transportPlaying) this.resyncExact(); })
+          .catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', revive);
+    window.addEventListener('focus', revive);
+    this.timers.push(window.setInterval(revive, 2000));
+  }
+
   private keepPlayingWhenLocked() {
+    this.keepContextAwake();
     try {
       const ms = (navigator as any).mediaSession;
       if (ms) {
