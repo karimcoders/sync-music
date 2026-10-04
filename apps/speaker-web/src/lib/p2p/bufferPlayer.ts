@@ -79,6 +79,36 @@ export class WebAudioPlayer {
     return b ? b.length * b.numberOfChannels * 4 : 0;
   }
 
+  /**
+   * Route an <audio> element through this same channel strip.
+   *
+   * Without this the mixer was a lie whenever the element was the thing
+   * making sound — while a song was still arriving, or when the phone could
+   * not decode the file — because the element talks straight to the speaker
+   * and never passes through the EQ or the echo. A browser allows only one
+   * source node per element, so it is created once and kept.
+   */
+  private elSource: MediaElementAudioSourceNode | null = null;
+  private elAttached: HTMLAudioElement | null = null;
+  attachElement(el: HTMLAudioElement): boolean {
+    if (this.elAttached === el) return true;
+    // Careful: once an element is routed into Web Audio it is SILENT while
+    // the context is suspended. Only take it over when the context is
+    // actually running, so a phone can never end up muted by the mixer.
+    if (this.ctx.state !== 'running') { void this.ctx.resume().catch(() => {}); return false; }
+    try {
+      this.elSource?.disconnect();
+      this.elSource = this.ctx.createMediaElementSource(el);
+      this.elSource.connect(this.mixer.input);
+      this.elAttached = el;
+      return true;
+    } catch {
+      // already attached to another context, or the browser refused: the
+      // element still plays, just without the EQ
+      return false;
+    }
+  }
+
   get ready() { return !!this.buffer; }
   get duration() { return this.buffer?.duration ?? 0; }
   get paused() { return this.stopped; }

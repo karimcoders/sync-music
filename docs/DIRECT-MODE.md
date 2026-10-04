@@ -560,3 +560,22 @@ when a track was sent but stayed unconfirmed for 10 s, and a repeated
 Measured after the change, two phones, local broker: every phone followed the
 switch in **267 ms**, then played the new song **13 ms** apart; a phone whose
 copy of the file was deleted got it back in **242 ms**.
+
+### Two real bugs behind "the mixer does nothing" and "every phone plays a different song"
+
+**The mixer only existed on one of the two playback paths.** A phone plays
+either the decoded buffer (Web Audio) or, while a file is still arriving or
+when the browser cannot decode it, the plain `<audio>` element. Only the first
+went through the channel strip; the element talked straight to the loudspeaker,
+so on a real phone the sliders often did nothing at all. The element is now
+routed into the same strip with `createMediaElementSource`. One guard matters:
+an element routed into Web Audio is silent while the context is suspended, so
+it is only taken over once the context is actually running — the mixer can
+never mute a phone.
+
+**"The first file to arrive wins" decided which song a phone played.** The host
+prefetches the whole playlist, and those files land in whatever order the
+network gives them, so three phones could settle on three different songs. The
+host names the current track in every transport message; that name is now the
+only authority, and a phone with no instruction yet keeps the bytes and plays
+nothing instead of guessing.

@@ -115,7 +115,12 @@ export class P2PHostClient {
   }
 
   private set(p: Partial<HostState>) { this.state = { ...this.state, ...p }; this.onChange(this.state); }
-  private pushTransport() { this.set({ transport: { ...this.transport } }); }
+  private pushTransport() {
+    this.set({ transport: { ...this.transport } });
+    // the "what comes next" hint must follow every playlist/track change,
+    // otherwise phones decode ahead for a song that is no longer next
+    this.hintNext();
+  }
 
   /** Link the speakers open — carries the room, so nothing has to be typed. */
   get speakerUrl() {

@@ -245,7 +245,10 @@ export class P2PSpeakerClient {
    * if it is there (instant) or from the host if it is not.
    */
   private wantedTrack: string | null = null;
+  /** the song the HOST says is current — the only authority on this */
+  private hostTrackId: string | null = null;
   private ensureTrack(trackId: string | null | undefined): boolean {
+    if (trackId) this.hostTrackId = trackId;
     if (!trackId || trackId === this.trackId) return true;
     if (this.wantedTrack === trackId) return false;   // already fetching
     this.wantedTrack = trackId;
@@ -277,8 +280,13 @@ export class P2PSpeakerClient {
    */
   private shouldBeCurrent(trackId: string) {
     if (this.wantedTrack) return this.wantedTrack === trackId;
+    // The host TELLS us which song is current in every transport message.
+    // "First file to arrive wins" was the reason three phones could sit on
+    // three different songs: during the prefetch the files land in whatever
+    // order the network gives them.
+    if (this.hostTrackId) return this.hostTrackId === trackId;
     if (this.trackId) return this.trackId === trackId;
-    return true;                       // nothing playing yet: first one wins
+    return false;                      // we do not know yet: keep it, play nothing
   }
 
   /**
@@ -656,6 +664,7 @@ export class P2PSpeakerClient {
         this.basePosition = m.position;
         this.baseHostTime = m.startAt;
         this.set({ playing: true });
+        this.hostTrackId = m.trackId ?? this.hostTrackId;
         if (!this.audioEnabled) { this.set({ phase: 'AUDIO_DISABLED' }); break; }
         if (!this.ensureTrack(m.trackId)) break;   // wrong song: stay silent until we have the right one
         this.loadAudio();
@@ -817,6 +826,9 @@ export class P2PSpeakerClient {
       el.dataset.audioId = this.trackId;
       el.load();
     }
+    // the element must go through the mixer too, or every slider does
+    // nothing until the song happens to be decoded
+    this.wa?.attachElement(el);
     this.decodeForExactPlayback();
     this.applyVolume();
   }
