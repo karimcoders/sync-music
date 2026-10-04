@@ -720,6 +720,15 @@ export class P2PSpeakerClient {
         void this.applyYouTube(m.videoId, m.position, m.atHostTime, m.playing);
         break;
 
+      case 'NEXT_HINT':
+        // not a command: just decode the next song in the background
+        if (this.nextHint !== m.trackId) {
+          this.nextHint = m.trackId;
+          this.preDecoded.clear();     // only ever hold one song ahead
+          this.decodeAhead();
+        }
+        break;
+
       case 'RENAME':
         this.set({ speakerName: m.name });
         break;
@@ -821,9 +830,23 @@ export class P2PSpeakerClient {
     const blob = this.blob;
     const id = this.trackId;
     if (!this.wa || !blob || !id || this.decoding || this.decodedId === id) return;
+    // already decoded ahead of time? install it instantly — this is what makes
+    // a song change cost nothing instead of a second or two of CPU
+    const warm = this.preDecoded.get(id);
+    if (warm) {
+      this.preDecoded.delete(id);
+      this.wa.setBuffer(warm);
+      this.decodedId = id;
+      this.afterDecode();
+      return;
+    }
     this.decoding = true;
-    void this.wa.load(blob)
-      .then(() => {
+    void this.wa.decode(blob)
+      .then((buf) => {
+        // The song changed while we were decoding: throw this away. Installing
+        // it would make the phone play the previous song under the new title.
+        if (this.trackId !== id || !this.wa) return;
+        this.wa.setBuffer(buf);
         this.decodedId = id;
         this.set({ duration: this.wa?.duration || this.state.duration, bufferedPct: 100 });
         // hand over from the element mid-song without a gap
@@ -835,7 +858,43 @@ export class P2PSpeakerClient {
         this.applyVolume();
       })
       .catch(() => { /* undecodable format — the element fallback still works */ })
-      .finally(() => { this.decoding = false; });
+      .finally(() => { this.decoding = false; this.decodeAhead(); });
+  }
+
+  /** shared tail of "a decoded song just became current" */
+  private afterDecode() {
+    this.set({ duration: this.wa?.duration || this.state.duration, bufferedPct: 100 });
+    if (this.transportPlaying && this.audioEnabled) {
+      try { this.el?.pause(); } catch {}
+      this.resyncExact();
+      this.set({ phase: 'PLAYING', playing: true, info: null });
+    }
+    this.applyVolume();
+    this.decodeAhead();
+  }
+
+  /**
+   * Decode the NEXT song quietly, while the current one plays, so that
+   * pressing next is just a pointer swap.
+   *
+   * Honest cost: one extra decoded song in memory (~21 MB per minute of
+   * stereo audio). Only ever one, and it is dropped as soon as the hint
+   * changes, so a long playlist does not accumulate.
+   */
+  private preDecoded = new Map<string, AudioBuffer>();
+  private nextHint: string | null = null;
+  private decodeAhead() {
+    const id = this.nextHint;
+    if (!id || !this.wa || this.decoding) return;
+    if (id === this.trackId || this.preDecoded.has(id)) return;
+    void getTrack(id).then((rec) => {
+      if (!rec || this.nextHint !== id || !this.wa || this.decoding) return;
+      this.decoding = true;
+      this.wa.decode(new Blob([rec.bytes], { type: rec.mimeType }))
+        .then((buf) => { if (this.nextHint === id) this.preDecoded.set(id, buf); })
+        .catch(() => {})
+        .finally(() => { this.decoding = false; });
+    }).catch(() => {});
   }
 
   private applyVolume() {

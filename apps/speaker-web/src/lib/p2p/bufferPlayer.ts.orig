@@ -18,9 +18,8 @@
  * already used (`currentTime`, `paused`, `play`, `pause`, `playbackRate`,
  * `volume`, `duration`, `buffered`), so the rest of the client is unchanged.
  *
- * Honest limits: decoding holds the whole song as PCM in memory (about
- * 21 MB per minute for stereo 44.1 kHz float32 — the old "10 MB" figure here
- * was wrong by half, so a 16-minute track is ~340 MB), and it needs the complete file, so a
+ * Honest limits: decoding holds the whole song as PCM in memory (roughly
+ * 10 MB per minute, stereo 44.1 kHz), and it needs the complete file, so a
  * track that is still arriving still plays through the element fallback.
  */
 import { MixerChannel, loadSettings } from '../audio/mixer';
@@ -50,33 +49,12 @@ export class WebAudioPlayer {
     this.gain.connect(this.mixer.input);
   }
 
-  /**
-   * Decode a complete file WITHOUT touching what is playing. Throws if the
-   * browser cannot decode it.
-   *
-   * This used to assign the result straight into `this.buffer`. If the host
-   * changed song while a decode was still running, the OLD song's decode
-   * finished later and silently overwrote the new song's state, so a phone
-   * showed one title and played another song's audio. Decoding and installing
-   * are now separate steps and the caller decides whether the result is still
-   * wanted.
-   */
-  async decode(blob: Blob): Promise<AudioBuffer> {
-    const bytes = await blob.arrayBuffer();     // a fresh copy each call; decodeAudioData detaches it
-    return this.ctx.decodeAudioData(bytes);
-  }
-
-  /** Make a decoded song the current one (null = forget the song). */
-  setBuffer(buf: AudioBuffer | null) {
-    this.teardown();
-    this.buffer = buf;
-    this.pending = 0;
-  }
-
-  /** Approximate PCM memory held by the installed song (float32). */
-  get bytesHeld(): number {
-    const b = this.buffer;
-    return b ? b.length * b.numberOfChannels * 4 : 0;
+  /** Decode a complete file. Throws if the browser cannot decode it. */
+  async load(blob: Blob) {
+    const bytes = await blob.arrayBuffer();
+    // decodeAudioData detaches the buffer, so hand it a copy we own
+    this.buffer = await this.ctx.decodeAudioData(bytes.slice(0));
+    this.pending = Math.min(this.pending, this.buffer.duration);
   }
 
   get ready() { return !!this.buffer; }
@@ -246,7 +224,7 @@ export class WebAudioPlayer {
 
   /** Forget the song. Used when the host switches track: `ready` must go
    *  false immediately so nothing can schedule the previous buffer. */
-  clear() { this.setBuffer(null); }
+  clear() { this.teardown(); this.buffer = null; this.pending = 0; }
 
   dispose() { this.teardown(); try { this.gain.disconnect(); } catch {} }
 }

@@ -50,12 +50,6 @@ export type P2PMessage =
   | { type: 'VOLUME'; seq: number; volume: number }
   | { type: 'RENAME'; name: string }
   /**
-   * "This is the song that comes next." Not a command (no seq, no timing): it
-   * only lets a phone decode the next song in the background so that the
-   * switch itself costs nothing. Old speakers simply ignore it.
-   */
-  | { type: 'NEXT_HINT'; trackId: string | null }
-  /**
    * Damped correction of a speaker's own clock estimate.
    *
    * Over the internet the two directions of a WebRTC channel are often not

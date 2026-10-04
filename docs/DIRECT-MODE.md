@@ -530,3 +530,33 @@ Honest consequences, all of them stated in the UI too:
 
 Measured live in `tools/mixer-yt-e2e.mjs`: two phones put on the same video,
 playing, **35 ms apart**.
+
+## Making a song change instant
+
+Four separate things used to make switching a song slow, and all four are fixed.
+
+1. **One send queue per phone, not one for everybody.** A single global queue
+   meant a slow phone downloading a 9 MB file blocked every other phone behind
+   it. Each phone now drains its own queue, with an *urgent* lane for the song
+   that is actually playing and a background lane for the prefetch.
+2. **Decode ahead.** The host sends a `NEXT_HINT` naming the next song; each
+   phone decodes it quietly while the current one plays, so the switch is a
+   pointer swap instead of one to two seconds of CPU. Honest cost: one extra
+   decoded song in memory (~21 MB per minute of stereo audio), never more than
+   one, dropped as soon as the hint changes.
+3. **No stale decode.** Decoding and installing are now separate steps. If the
+   song changes mid-decode the result is discarded, instead of overwriting the
+   new song and leaving a phone showing one title while playing another.
+4. **One IndexedDB connection, keys-only listing.** The cache used to open a
+   fresh database connection for every read and write and never close any, and
+   it read every saved song's bytes into memory just to list their ids on each
+   connect.
+
+Also: any message from a phone now counts as proof of life (a phone busy
+receiving chunks could previously be reaped mid-transfer), re-sends only happen
+when a track was sent but stayed unconfirmed for 10 s, and a repeated
+`TRACK_WANT` joins the transfer already in flight instead of restarting it.
+
+Measured after the change, two phones, local broker: every phone followed the
+switch in **267 ms**, then played the new song **13 ms** apart; a phone whose
+copy of the file was deleted got it back in **242 ms**.

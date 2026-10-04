@@ -275,18 +275,9 @@ export class SpeakerClient {
    * Fetch-and-cache the asset once (Cache API), then play from the cache.
    * Audio comes from storage/CDN, never from the host device.
    */
-  private loadingId: string | null = null;
   private async loadAudio(url: string, audioId: string) {
     if (!this.audio) return;
     if (this.audio.dataset.audioId === audioId && this.audio.src) return;
-    // Two things went wrong here when the host changed song quickly:
-    //  - the same song was fetched twice (the id was only recorded AFTER the
-    //    download, so a second call for it started a second download), and
-    //  - a slow download of the OLD song could finish after the new one and
-    //    overwrite it, so the phone played the wrong song.
-    // The latest request now wins and a stale one is dropped.
-    if (this.loadingId === audioId) return;
-    this.loadingId = audioId;
     this.set({ phase: 'SYNCING', info: 'Loading track…' });
     let src = url;
     try {
@@ -304,27 +295,10 @@ export class SpeakerClient {
     } catch {
       src = url; // streaming fallback with HTTP range requests
     }
-    if (this.loadingId !== audioId) return;        // the host moved on while we were downloading
-    this.loadingId = null;
-    if (!this.audio) return;
     this.audio.src = src;
     this.audio.dataset.audioId = audioId;
     this.audio.load();
     this.set({ info: null });
-  }
-
-  /**
-   * Download the NEXT song into the cache while the current one plays, so a
-   * song change finds it already on the phone instead of starting a download.
-   */
-  private async warmCache(url: string, audioId: string) {
-    try {
-      if (!('caches' in window)) return;
-      const cache = await caches.open('sync-music-audio-v1');
-      if (await cache.match(audioId)) return;
-      const net = await fetch(url, { mode: 'cors' });
-      if (net.ok) await cache.put(audioId, net);
-    } catch { /* best effort */ }
   }
 
   /* --------------------------- server events ------------------------ */
@@ -374,8 +348,6 @@ export class SpeakerClient {
           this.currentUrl = absoluteAudioUrl(track.url);
           if (this.audioEnabled) await this.loadAudio(this.currentUrl, track.id);
         }
-        const next = msg.playlist[msg.trackIndex + 1];
-        if (next && this.audioEnabled) void this.warmCache(absoluteAudioUrl(next.url), next.id);
         // ask for the authoritative transport that goes with this playlist
         this.send({ type: 'SPEAKER_READY' });
         break;

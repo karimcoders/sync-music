@@ -21,15 +21,27 @@ export interface StoredTrack {
   bytes: ArrayBuffer;
 }
 
+/**
+ * ONE connection, opened once. It used to open a fresh connection on every
+ * single read and write and never close any of them, which slows every song
+ * change down a little more each time and eventually starves the browser.
+ */
+let dbPromise: Promise<IDBDatabase> | null = null;
 function open(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB, 1);
-    req.onupgradeneeded = () => {
-      if (!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE, { keyPath: 'id' });
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+  if (!dbPromise) {
+    dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(DB, 1);
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE, { keyPath: 'id' });
+      };
+      req.onsuccess = () => {
+        req.result.onclose = () => { dbPromise = null; };
+        resolve(req.result);
+      };
+      req.onerror = () => { dbPromise = null; reject(req.error); };
+    });
+  }
+  return dbPromise;
 }
 
 async function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
@@ -47,5 +59,12 @@ export const deleteTrack = (id: string) => tx('readwrite', (s) => s.delete(id)).
 export const clearTracks = () => tx('readwrite', (s) => s.clear()).catch(() => undefined);
 export const getTrack = (id: string) =>
   tx<StoredTrack | undefined>('readonly', (s) => s.get(id)).catch(() => undefined);
-/** ids this phone already holds — sent to the host so it skips the transfer */
-export const trackIds = async () => (await allTracks()).map((t) => t.id);
+/**
+ * ids this phone already holds — sent to the host so it skips the transfer.
+ * Keys only: this used to read EVERY saved song (all the audio bytes) into
+ * memory just to list their names, on every connect.
+ */
+export const trackIds = async (): Promise<string[]> => {
+  try { return (await tx<IDBValidKey[]>('readonly', (s) => s.getAllKeys())).map(String); }
+  catch { return []; }
+};
