@@ -252,3 +252,43 @@ Three fixes after testing on a real phone:
    grey — brightness carries the meaning, which survives sunlight on a cheap
    screen), a bottom tab bar (PLAYER / SPEAKER / SOUND), large app-style
    titles, greyscale artwork and white transport controls.
+
+## Low internet, and what "offline" can honestly mean
+
+The goal is a command that lands on every phone at the same instant even when
+one of them is on a terrible connection — and music that does not stop when a
+phone drops off the network. Four mechanisms, all measured:
+
+1. **The phone keeps the music.** Every song a speaker receives is stored in
+   its own IndexedDB (`sync-music-speaker`). On the next connection it tells
+   the host what it already holds (`HELLO.cached`, repeated in `STATUS`), and
+   the host skips those transfers entirely. Measured: after a reload the song
+   was ready again in **6–26 ms** with nothing sent over the network.
+2. **The whole playlist is pushed ahead of time**, current song first, as soon
+   as a phone connects or a song is added — so PLAY never waits for a
+   download, however slow that phone is.
+3. **Commands are sent three times** (0, 60, 220 ms). They are tiny and
+   idempotent — a speaker ignores a `seq` it has already applied — so a lossy
+   link stops being a lost command. Measured on a **2G-throttled phone**
+   (60 kB/s, 300 ms latency): it started **17 ms** from the fast phone and
+   PAUSE reached both within 1.5 s.
+4. **Playback free-runs when the network dies.** The speaker holds the bytes
+   and the timeline, so it keeps playing on its own clock, says *"Offline —
+   playing from this phone"*, and re-syncs silently when it comes back.
+   Measured: network cut for 6 s, playback continued and the phone reconnected
+   by itself.
+
+What is **not** possible, stated plainly:
+
+* **The first connection needs the internet once.** WebRTC needs a rendezvous
+  (signalling) server before two phones can find each other, and this build has
+  no server of its own. After that handshake, if both phones are on the same
+  Wi-Fi, traffic is local — the internet can drop and the room keeps working.
+* **A phone that is offline from the start cannot join**, and one that is
+  offline cannot receive a *new* song or a *new* command — it keeps doing the
+  last thing it was told. There is no way around that without a local server
+  on the network (`server/` in this repo does exactly that job over LAN).
+* Nothing here is zero-latency. It is a few tens of milliseconds, measured and
+  printed by `tools/p2p-e2e.mjs`, not a promise.
+
+New suite: `node tools/offline-e2e.mjs <url>`.

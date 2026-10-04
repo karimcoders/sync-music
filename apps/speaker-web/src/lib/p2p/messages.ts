@@ -15,7 +15,8 @@
 
 export type P2PMessage =
   // handshake ------------------------------------------------------------
-  | { type: 'HELLO'; deviceId: string; name?: string }
+  /** `cached` lists tracks this phone already holds, so nothing is re-sent */
+  | { type: 'HELLO'; deviceId: string; name?: string; cached?: string[] }
   | { type: 'WELCOME'; speakerId: string; name: string; sessionName: string; hostTime: number }
   // clock sync (T1..T4, identical maths to the WebSocket mode) ------------
   | { type: 'PING'; t1: number }
@@ -63,6 +64,8 @@ export type P2PMessage =
       clockRtt: number; clockSynced: boolean; clockSamples: number;
       /** last transport seq we applied, and the track we actually hold */
       seq: number; haveTrack: string | null;
+      /** everything this phone holds on disk, so the host can skip transfers */
+      cached?: string[];
       /** how far our own audio is from where WE think it should be (ms) */
       selfDriftMs: number;
     };

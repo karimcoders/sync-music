@@ -1,4 +1,5 @@
 import Peer, { DataConnection } from 'peerjs';
+import { getTrack, putTrack, trackIds } from './speakerCache';
 
 import { ClockSync, DriftController, projectPosition } from '@sync-music/sync-engine';
 import { SILENT_WAV, type UiState } from '../client';
@@ -164,7 +165,10 @@ export class P2PSpeakerClient {
       });
       const lost = () => {
         if (won !== conn || this.conn !== conn) return;         // a dead slot, not our host
-        this.set({ conn: 'reconnecting', hostOnline: false });
+        this.set({
+          conn: 'reconnecting', hostOnline: false,
+          info: this.transportPlaying ? 'Offline — playing from this phone.' : null,
+        });
         this.scheduleReconnect();
       };
       conn.on('close', lost);
@@ -176,7 +180,10 @@ export class P2PSpeakerClient {
     this.retry = 0;
     this.set({ conn: 'connected', sessionId: conn.peer, error: null, info: null,
       phase: this.audioEnabled ? 'AUDIO_READY' : 'AUDIO_DISABLED', hostOnline: true });
-    this.send({ type: 'HELLO', deviceId: deviceId() });
+    void trackIds().then((cached) => {
+      this.cachedIds = cached;
+      this.send({ type: 'HELLO', deviceId: deviceId(), cached });
+    });
     // A data channel is much jitterier than a WebSocket right after it opens,
     // and a bad offset here shows up directly as phones being apart. So we
     // probe hard for the first few seconds and keep a steady 1 Hz afterwards;
@@ -190,7 +197,12 @@ export class P2PSpeakerClient {
     this.timers.push(window.setInterval(() => {
       if (this.closed || this.reconnectPending) return;
       if (Date.now() - this.lastInbound > 6000) {
-        this.set({ conn: 'reconnecting', hostOnline: false, info: 'Host went away — reconnecting…' });
+        this.set({
+          conn: 'reconnecting', hostOnline: false,
+          info: this.transportPlaying
+            ? 'Lost the host — still playing from this phone, will re-sync automatically.'
+            : 'Lost the host — reconnecting…',
+        });
         try { this.conn?.close(); } catch {}
         this.scheduleReconnect();
       }
@@ -204,6 +216,19 @@ export class P2PSpeakerClient {
    * silent for the whole song. Now we notice the gap and ask for exactly the
    * missing pieces again.
    */
+  /** Point playback at a complete track, wherever the bytes came from. */
+  private adoptTrack(trackId: string, title: string, blob: Blob) {
+    if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
+    this.objectUrl = URL.createObjectURL(blob);
+    this.trackId = trackId;
+    this.haveTrack = trackId;
+    this.set({ trackTitle: title, trackArtist: '', info: null, bufferedPct: 100 });
+    if (this.audioEnabled) this.loadAudio();
+    this.send({ type: 'TRACK_READY', trackId });
+    // we may have been told to play while the file was still arriving
+    if (this.transportPlaying) this.catchUp();
+  }
+
   /** Play the host's live microphone alongside the music. */
   private micAudio: HTMLAudioElement | null = null;
   private playMic(stream: MediaStream) {
@@ -271,6 +296,11 @@ export class P2PSpeakerClient {
   /* ------------------------------- events ------------------------------ */
 
   private async handle(m: P2PMessage) {
+    // The host sends every transport command three times so a weak link
+    // cannot swallow it. Applying the same one twice would re-schedule
+    // playback, so anything we have already acted on is dropped here.
+    if ('seq' in m && typeof (m as any).seq === 'number' && m.type !== 'STATE'
+        && (m as any).seq <= this.appliedSeq) return;
     switch (m.type) {
       case 'WELCOME':
         this.set({ speakerName: m.name, sessionName: m.sessionName, hostOnline: true });
@@ -296,10 +326,16 @@ export class P2PSpeakerClient {
         this.send({ type: 'PONG', t1: m.t1, t2: Date.now(), t3: Date.now() });
         break;
 
-      case 'TRACK_META':
+      case 'TRACK_META': {
         // already have these exact bytes — never swap the blob we are playing
         if (this.haveTrack === m.trackId && this.objectUrl) {
           this.send({ type: 'TRACK_READY', trackId: m.trackId });
+          break;
+        }
+        // or we downloaded it on an earlier night: nothing to transfer at all
+        const cached = await getTrack(m.trackId);
+        if (cached) {
+          this.adoptTrack(m.trackId, cached.title, new Blob([cached.bytes], { type: cached.mimeType }));
           break;
         }
         this.incoming = {
@@ -310,6 +346,7 @@ export class P2PSpeakerClient {
         this.lastChunkAt = Date.now();
         this.startChunkChase();
         break;
+      }
 
       case 'TRACK_CHUNK': {
         const inc = this.incoming;
@@ -320,18 +357,19 @@ export class P2PSpeakerClient {
         this.set({ bufferedPct: Math.round((inc.got / inc.chunks) * 100) });
         if (inc.got < inc.chunks) break;
 
-        if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
         const blob = new Blob(inc.parts as ArrayBuffer[], { type: inc.mime || 'audio/mpeg' });
-        this.objectUrl = URL.createObjectURL(blob);
-        this.trackId = inc.trackId;
-        this.haveTrack = inc.trackId;
-        this.incoming = null;
         window.clearInterval(this.chaseTimer);
-        this.set({ trackTitle: inc.title, trackArtist: '', info: null, bufferedPct: 100 });
-        if (this.audioEnabled) this.loadAudio();
-        this.send({ type: 'TRACK_READY', trackId: this.trackId });
-        // we may have been told to play while the file was still arriving
-        if (this.transportPlaying) this.catchUp();
+        this.incoming = null;
+        // keep it: this phone never needs to download this song again, even
+        // after a refresh or a night offline
+        void blob.arrayBuffer().then((bytes) => {
+          void putTrack({
+            id: inc.trackId, title: inc.title, artist: '', filename: inc.title,
+            mimeType: inc.mime || 'audio/mpeg', size: bytes.byteLength, duration: 0, bytes,
+          });
+          if (!this.cachedIds.includes(inc.trackId)) this.cachedIds.push(inc.trackId);
+        });
+        this.adoptTrack(inc.trackId, inc.title, blob);
         break;
       }
 
@@ -622,6 +660,7 @@ export class P2PSpeakerClient {
   }
 
   private wakeLock: any = null;
+  private cachedIds: string[] = [];
   private bigErrors = 0;
   private lastErr = 0;
 
@@ -634,7 +673,7 @@ export class P2PSpeakerClient {
         rate: a?.playbackRate ?? 1, playing: !!a && !a.paused, buffered: Math.max(0, buffered),
         clockRtt: Math.round(this.clock.rtt), clockSynced: this.clock.synced,
         clockSamples: this.clock.sampleCount,
-        seq: this.appliedSeq, haveTrack: this.haveTrack,
+        seq: this.appliedSeq, haveTrack: this.haveTrack, cached: this.cachedIds,
         selfDriftMs: a && !a.paused ? Math.round((a.currentTime - this.targetPosition()) * 1000) : 0,
       });
       this.timers.push(window.setTimeout(report, 600));

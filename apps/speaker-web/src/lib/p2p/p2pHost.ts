@@ -339,8 +339,13 @@ export class P2PHostClient {
         break;
       case 'HELLO':
         if (m.name) { c.info = { ...c.info, name: m.name }; this.publishSpeakers(); }
+        // Everything this phone kept from an earlier session is a transfer we
+        // do not have to make — that is what makes the next PLAY instant.
+        (m.cached ?? []).forEach((id) => c.sent.add(id));
+        this.prefetch(peerId);
         break;
       case 'STATUS': {
+        (m.cached ?? []).forEach((id) => c.sent.add(id));
         // strict: a settled data channel on the same LAN sits in the low ms range
         this.clockReady.set(peerId, !!m.clockSynced && m.clockRtt < 40 && m.clockSamples >= 10);
         const track = this.transport.playlist[this.transport.trackIndex];
@@ -438,6 +443,17 @@ export class P2PHostClient {
   /** set whenever a transport command is sent: transfers yield to it */
   private lastCommandAt = 0;
 
+  /**
+   * Transport commands are tiny and idempotent (the speaker ignores a `seq` it
+   * has already applied), so we simply send each one three times a few tens of
+   * ms apart. On a weak phone that turns "the command was lost, wait for the
+   * next STATUS repair" into "it arrived".
+   */
+  private broadcastReliable(m: P2PMessage) {
+    this.broadcast(m);
+    [60, 220].forEach((d) => window.setTimeout(() => this.broadcast(m), d));
+  }
+
   private broadcast(m: P2PMessage) { this.conns.forEach((c) => this.send(c.conn, m)); }
 
   /* -------------------------------- library ----------------------------- */
@@ -459,6 +475,7 @@ export class P2PHostClient {
         mimeType: track.mimeType, size: track.size, duration, bytes,
       });
       this.transport = { ...this.transport, playlist: [...this.transport.playlist, track] };
+      this.conns.forEach((_c, p) => this.prefetch(p));
       if (this.transport.trackIndex < 0) this.transport = { ...this.transport, trackIndex: 0, trackId: id };
       this.pushTransport();
       this.set({ info: `Sending “${track.title}” to ${this.conns.size} phone(s)…` });
@@ -484,8 +501,8 @@ export class P2PHostClient {
    * stuttering felt like.
    */
   private queue: Promise<void> = Promise.resolve();
-  private pushTrackTo(peerId: string) {
-    const run = () => this.sendTrack(peerId);
+  private pushTrackTo(peerId: string, trackId?: string) {
+    const run = () => this.sendTrack(peerId, trackId);
     this.queue = this.queue.then(run, run);
     return this.queue;
   }
@@ -506,9 +523,24 @@ export class P2PHostClient {
     }
   }
 
-  private async sendTrack(peerId: string) {
+  /**
+   * Send this phone every song it is missing, current one first, before it is
+   * ever asked to play them. A speaker that already holds the bytes starts
+   * instantly and does not care how slow its connection is.
+   */
+  private prefetch(peerId: string) {
+    const order = [
+      this.transport.playlist[this.transport.trackIndex],
+      ...this.transport.playlist,
+    ].filter(Boolean) as AudioTrack[];
+    order.forEach((t) => void this.pushTrackTo(peerId, t.id));
+  }
+
+  private async sendTrack(peerId: string, trackId?: string) {
     const c = this.conns.get(peerId);
-    const cur = this.transport.playlist[this.transport.trackIndex];
+    const cur = trackId
+      ? this.transport.playlist.find((t) => t.id === trackId)
+      : this.transport.playlist[this.transport.trackIndex];
     if (!c || !cur) return;
     const f = this.files.get(cur.id);
     if (!f || c.sent.has(cur.id)) return;
@@ -722,7 +754,7 @@ export class P2PHostClient {
     // make sure everybody has the bytes before the scheduled moment
     this.conns.forEach((_c, p) => void this.pushTrackTo(p));
     this.lastCommandAt = Date.now();
-    this.broadcast({ type: 'PLAY', seq: ++this.cmdSeq, trackId: track.id, position: pos, startAt });
+    this.broadcastReliable({ type: 'PLAY', seq: ++this.cmdSeq, trackId: track.id, position: pos, startAt });
     this.applyLocal();
   }
 
@@ -732,7 +764,7 @@ export class P2PHostClient {
     this.transport = { ...this.transport, state: 'paused', position: pos, positionAtServerTime: Date.now() };
     this.pushTransport();
     this.lastCommandAt = Date.now();
-    this.broadcast({ type: 'PAUSE', seq: ++this.cmdSeq, position: pos });
+    this.broadcastReliable({ type: 'PAUSE', seq: ++this.cmdSeq, position: pos });
     this.applyLocal();
   }
 
@@ -742,7 +774,7 @@ export class P2PHostClient {
     this.transport = { ...this.transport, state: 'stopped', position: 0, positionAtServerTime: Date.now() };
     this.pushTransport();
     this.lastCommandAt = Date.now();
-    this.broadcast({ type: 'STOP', seq: ++this.cmdSeq });
+    this.broadcastReliable({ type: 'STOP', seq: ++this.cmdSeq });
     this.applyLocal();
   }
 
@@ -753,7 +785,7 @@ export class P2PHostClient {
     this.transport = { ...this.transport, position, positionAtServerTime: applyAt };
     this.pushTransport();
     this.lastCommandAt = Date.now();
-    this.broadcast({ type: 'SEEK', seq: ++this.cmdSeq, trackId: track.id, position, applyAt });
+    this.broadcastReliable({ type: 'SEEK', seq: ++this.cmdSeq, trackId: track.id, position, applyAt });
     this.applyLocal();
   }
 
@@ -770,7 +802,7 @@ export class P2PHostClient {
     this.transport = { ...this.transport, volume: v };
     this.pushTransport();
     this.lastCommandAt = Date.now();
-    this.broadcast({ type: 'VOLUME', seq: ++this.cmdSeq, volume: v });
+    this.broadcastReliable({ type: 'VOLUME', seq: ++this.cmdSeq, volume: v });
     this.applyLocal();
   }
 
@@ -826,7 +858,7 @@ export class P2PHostClient {
 
   async end() {
     this.lastCommandAt = Date.now();
-    this.broadcast({ type: 'STOP', seq: ++this.cmdSeq });
+    this.broadcastReliable({ type: 'STOP', seq: ++this.cmdSeq });
     this.applyLocal();
     this.conns.forEach((c) => { try { c.conn.close(); } catch {} });
     this.conns.clear();
