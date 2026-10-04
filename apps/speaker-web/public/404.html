@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Sync Music</title>
+<!--
+  GitHub Pages serves this file for any path it does not have a file for.
+  The app is a single page that routes on the hash, so a link somebody typed
+  or shared as /sync-music/speaker would otherwise just 404. Translate it
+  into the hash route and carry on — nobody should have to know about the #.
+-->
+<script>
+  (function () {
+    var base = '/sync-music/';
+    var p = location.pathname;
+    var rest = p.indexOf(base) === 0 ? p.slice(base.length) : p.replace(/^\//, '');
+    rest = rest.replace(/\/+$/, '');
+    var known = ['speaker', 'host', 'sound'];
+    var target = known.indexOf(rest) >= 0 ? '#/' + rest : '#/';
+    location.replace(base + target + location.search);
+  })();
+</script>
+<style>
+  html,body{height:100%;margin:0;background:#07060f;color:#f6f4ff;
+    font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    display:grid;place-items:center}
+</style>
+</head>
+<body>Opening Sync Music…</body>
+</html>
