@@ -189,6 +189,8 @@ export default function Host({ go }: { go: (p: string) => void }) {
         </div>
       </Card>
 
+      <CloudCard host={c} />
+
       <Card>
         <Row>
           <div className="kicker">Playlist</div>
@@ -314,5 +316,72 @@ export default function Host({ go }: { go: (p: string) => void }) {
       </Row>
       <div className="footer-note">build {__BUILD__}</div>
     </Shell>
+  );
+}
+
+/**
+ * Fast delivery.
+ *
+ * Without it this phone uploads the same song once per speaker over its own
+ * connection, which is why a phone can sit at "Getting the new song… 51 %".
+ * With it the song is uploaded ONCE to a GitHub branch and every speaker
+ * downloads it from GitHub's servers in parallel, at its own full speed.
+ *
+ * The token is typed in here and stays in this phone's browser storage. It is
+ * never put in the app, never sent to a speaker, and never shown to anybody
+ * who opens the speaker page.
+ */
+function CloudCard({ host }: { host: any }) {
+  const saved = host?.cloudConfig ?? null;
+  const [open, setOpen] = useState(false);
+  const [repo, setRepo] = useState(saved?.repo ?? 'karimcoders/sync-music');
+  const [token, setToken] = useState('');
+  const on = !!host?.cloudReady;
+  if (!host?.setCloud) return null;
+
+  return (
+    <Card>
+      <Row>
+        <div className="kicker">Fast delivery {on ? '· ON' : '· OFF'}</div>
+        <button className="chip" onClick={() => setOpen((v) => !v)} data-testid="cloud-toggle">
+          {open ? 'Close' : on ? 'Change' : 'Set up'}
+        </button>
+      </Row>
+      <div className="tiny" style={{ marginTop: 8 }}>
+        {on
+          ? 'Songs are uploaded once and every phone downloads its own copy directly — no waiting for this phone to send it to each one.'
+          : 'Right now this phone sends the whole song separately to every speaker, so more phones means a longer wait. Turn this on to upload each song once instead.'}
+      </div>
+      {open && (
+        <Stack>
+          <div style={{ height: 10 }} />
+          <Field label="Repository (owner/name)">
+            <input value={repo} onChange={(e) => setRepo(e.target.value)} data-testid="cloud-repo" />
+          </Field>
+          <Field label="GitHub token with write access">
+            <input
+              type="password" value={token} placeholder={on ? '•••••••• (saved)' : 'ghp_…'}
+              onChange={(e) => setToken(e.target.value)} data-testid="cloud-token"
+            />
+          </Field>
+          <div className="tiny">
+            Honest about this: the songs become public files at a public link that
+            anyone can download, and the token is stored in THIS phone's browser.
+            If the upload ever fails, nothing breaks — the phones simply get the
+            song the slower way.
+          </div>
+          <Row>
+            <Button
+              testId="cloud-save"
+              onClick={() => {
+                host.setCloud({ repo: repo.trim(), branch: 'audio-cdn', token: token.trim() || saved?.token || '' });
+                setToken(''); setOpen(false);
+              }}
+            >Save</Button>
+            {on && <Button variant="ghost" onClick={() => { host.setCloud(null); setOpen(false); }}>Turn off</Button>}
+          </Row>
+        </Stack>
+      )}
+    </Card>
   );
 }

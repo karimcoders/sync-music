@@ -26,6 +26,13 @@ export type P2PMessage =
   // for seconds, which starves the control messages and makes playback
   // stutter on the phones that are still receiving.
   | { type: 'TRACK_META'; trackId: string; title: string; mime: string; size: number; chunks: number }
+  /**
+   * "The song is also sitting at this URL." A phone that can reach it
+   * downloads from there at full speed instead of waiting for the host's one
+   * uplink to send it megabyte by megabyte. Purely an optimisation: a phone
+   * that cannot fetch it just waits for the normal transfer.
+   */
+  | { type: 'TRACK_URL'; trackId: string; title: string; mime: string; url: string }
   | { type: 'TRACK_CHUNK'; trackId: string; index: number; bytes: ArrayBuffer }
   | { type: 'TRACK_READY'; trackId: string }
   /** a speaker noticed holes in the transfer and asks for those chunks again */

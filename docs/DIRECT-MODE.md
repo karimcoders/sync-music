@@ -607,3 +607,48 @@ noisy. Playback restarts are now suppressed for exactly that period (the rate
 ramp handles it instead), but on a loaded machine a run can still show a
 handful of corrections in the first seconds after a join, and a phone cannot
 make any sound at all until the whole file has arrived.
+
+## The cloud shortcut (what beatsync.gg does, without a new account)
+
+beatsync.gg is fast at getting a song onto every device for one reason: the
+file lives on object storage behind a CDN (Cloudflare R2), so every phone
+downloads its own copy over plain HTTPS, in parallel. Their clock
+synchronisation is the same NTP-style idea this project already uses.
+
+Our bottleneck was never the clock — it was that the host phone had to upload
+the SAME song once per speaker over WebRTC. Five phones meant five uploads out
+of one phone's connection, which is what "Getting the new song… 51 %" was.
+
+So the host can now park each song in a **GitHub branch** (`audio-cdn`) and
+broadcast a `TRACK_URL`. Every phone fetches it from GitHub's servers at its
+own full speed, caches it, and tells the host it has it — the host then skips
+the phone-to-phone transfer for that phone entirely. It needs no new account:
+the same GitHub login that hosts this site does the job. `raw.githubusercontent.com`
+serves the file with `access-control-allow-origin: *` and byte ranges, which
+is all a browser needs.
+
+Measured on the bench, three phones, one 5 MB song, time from "song added" to
+"this phone holds the song":
+
+| | phone 1 | phone 2 | phone 3 | slowest |
+|---|---|---|---|---|
+| phone-to-phone only | 9 543 ms | 4 166 ms | 9 798 ms | **9 798 ms** |
+| with the cloud copy | 3 236 ms | 3 304 ms | 4 606 ms | **4 606 ms** |
+
+The gap widens with every extra phone: the phone-to-phone path divides one
+uplink between them, the cloud path does not.
+
+Honest limits, all of them:
+
+* the songs become **public files at a public URL**. The repository is public,
+  so anyone with the link can download them. Do not use it for anything
+  private.
+* it needs a GitHub token with write access to one repository. It is typed in
+  on the host phone, stored in that phone's browser only, never committed,
+  never sent to a speaker. Anyone who can unlock the host page on that phone
+  can read it — use a token scoped to this one repository.
+* the host still has to upload the song once, and GitHub's API takes base64,
+  which makes that one upload about a third larger than the file.
+* if there is no token, no network, or the upload fails, nothing breaks: the
+  phone-to-phone transfer is still running underneath.
+* `tools/cloud-e2e.mjs <url> [token]` reproduces the table above.

@@ -4,6 +4,7 @@ import { projectPosition } from '@sync-music/sync-engine';
 import type { HostState } from '../hostClient';
 import { BROKERS, FIXED_ROOM_ID, P2PMessage, ROOM_SLOTS, codeFromRoomId, newRoomCode, peerOptions, roomIdFromCode } from './messages';
 import { allTracks, clearTracks, deleteTrack, putTrack } from './trackStore';
+import { loadCloud, saveCloud, uploadTrack, type CloudConfig } from './cloud';
 
 /**
  * Direct-mode host: this browser tab IS the server.
@@ -45,6 +46,9 @@ export class P2PHostClient {
   private peer: Peer | null = null;
   private conns = new Map<string, Conn>();
   private files = new Map<string, { track: AudioTrack; bytes: ArrayBuffer; mime: string }>();
+  /** songs already parked in the cloud: trackId → public URL */
+  private urls = new Map<string, string>();
+  private cloud: CloudConfig | null = loadCloud();
   private timers: number[] = [];
   private seq = 0;           // ids for uploaded tracks
   /**
@@ -412,6 +416,7 @@ export class P2PHostClient {
         // Everything this phone kept from an earlier session is a transfer we
         // do not have to make — that is what makes the next PLAY instant.
         (m.cached ?? []).forEach((id) => { c.sent.add(id); c.have.add(id); });
+        this.urls.forEach((_u, id) => this.sendUrl(c.conn, id));
         this.prefetch(peerId);
         this.hintNext(peerId);
         this.sendYtTo(c.conn);
@@ -559,6 +564,52 @@ export class P2PHostClient {
 
   /* -------------------------------- library ----------------------------- */
 
+  /* ------------------------- the cloud shortcut ------------------------- */
+
+  get cloudConfig() { return this.cloud; }
+  get cloudReady() { return !!this.cloud?.token; }
+
+  /** Save (or clear) the cloud settings on THIS phone and re-upload the library. */
+  setCloud(cfg: CloudConfig | null) {
+    this.cloud = cfg && cfg.token ? { ...cfg, branch: cfg.branch || 'audio-cdn' } : null;
+    saveCloud(this.cloud);
+    this.set({ info: this.cloud ? 'Cloud delivery is on for this phone.' : 'Cloud delivery is off.' });
+    if (this.cloud) this.files.forEach((_f, id) => void this.publishToCloud(id));
+  }
+
+  /**
+   * Put one song in the cloud and tell every phone where it is.
+   *
+   * Runs in the background: the normal phone-to-phone transfer is already
+   * under way and is simply not needed by whoever finishes the download
+   * first.
+   */
+  private async publishToCloud(trackId: string) {
+    const cfg = this.cloud;
+    const f = this.files.get(trackId);
+    if (!cfg || !f || this.urls.has(trackId)) return;
+    try {
+      this.set({ info: `Uploading “${f.track?.title ?? trackId}” to the cloud once…` });
+      const url = await uploadTrack(cfg, trackId, f.bytes, f.track?.filename || `${trackId}.mp3`);
+      this.urls.set(trackId, url);
+      this.set({ info: 'Cloud copy ready — phones download it directly.' });
+      this.conns.forEach((c) => this.sendUrl(c.conn, trackId));
+    } catch (e: any) {
+      // Never fatal: the phone-to-phone path is still running.
+      this.set({ error: `Cloud upload failed (${e?.message || 'unknown'}). Phones will get the song the slow way.` });
+    }
+  }
+
+  private sendUrl(conn: DataConnection, trackId: string) {
+    const url = this.urls.get(trackId);
+    const f = this.files.get(trackId);
+    if (!url || !f) return;
+    this.send(conn, {
+      type: 'TRACK_URL', trackId, url,
+      title: f.track?.title ?? 'Track', mime: f.mime,
+    });
+  }
+
   async upload(file: File) {
     this.set({ uploading: true, error: null, info: 'Reading the file…' });
     try {
@@ -579,6 +630,8 @@ export class P2PHostClient {
       this.conns.forEach((_c, p) => this.prefetch(p));
       if (this.transport.trackIndex < 0) this.transport = { ...this.transport, trackIndex: 0, trackId: id };
       this.pushTransport();
+      // The cloud copy is the fast path; start it first and do not wait for it.
+      void this.publishToCloud(id);
       this.set({ info: `Sending “${track.title}” to ${this.conns.size} phone(s)…` });
       this.hintNext();
       await Promise.all([...this.conns.keys()].map((p) => this.enqueueTrack(p, id)));
@@ -725,6 +778,9 @@ export class P2PHostClient {
     const f = this.files.get(cur.id);
     if (!f) return;
     if (c.sent.has(cur.id) && !force) return;
+    // it already told us it holds this song (usually because it pulled the
+    // cloud copy while we were queueing): sending it again is pure waste
+    if (c.have.has(cur.id)) { c.sent.add(cur.id); return; }
     c.sent.add(cur.id);
 
     this.sending.set(peerId, cur.id);

@@ -1,5 +1,6 @@
 import Peer, { DataConnection } from 'peerjs';
 import { getTrack, putTrack, trackIds } from './speakerCache';
+import { fetchTrack } from './cloud';
 import { WebAudioPlayer } from './bufferPlayer';
 import { MixerChannel, loadSettings, saveSettings, type MixerSettings } from '../audio/mixer';
 import { createPlayer, type YtHandle } from '../audio/youtube';
@@ -314,6 +315,46 @@ export class P2PSpeakerClient {
       this.send({ type: 'TRACK_WANT', trackId });
     }, 2500);
     this.timers.push(this.wantTimer);
+  }
+
+  /**
+   * Download the song straight from the cloud copy.
+   *
+   * This is the whole reason a phone no longer sits at "Getting the new
+   * song… 51 %": instead of waiting its turn on the host's single uplink, it
+   * pulls the file over ordinary HTTPS, in parallel with every other phone,
+   * as fast as its own connection goes.
+   *
+   * Everything about it is best-effort. If the URL is unreachable, blocked,
+   * or the phone is offline, nothing is lost — the phone-to-phone transfer is
+   * still running underneath and will finish the job.
+   */
+  private cloudPulls = new Set<string>();
+  private async pullFromCloud(trackId: string, title: string, mime: string, url: string) {
+    if (this.cloudPulls.has(trackId)) return;
+    if (this.trackId === trackId && this.blob) return;      // already have it
+    const cached = await getTrack(trackId).catch(() => null);
+    if (cached) { this.send({ type: 'TRACK_READY', trackId }); return; }
+    this.cloudPulls.add(trackId);
+    const current = () => this.wantedTrack === trackId || this.hostTrackId === trackId;
+    try {
+      const bytes = await fetchTrack(url, (pct) => {
+        if (current()) this.set({ info: `Downloading the song… ${pct}%`, bufferedPct: pct });
+      });
+      await putTrack({
+        id: trackId, title, artist: '', filename: title, mimeType: mime || 'audio/mpeg',
+        size: bytes.byteLength, duration: 0, bytes,
+      });
+      this.send({ type: 'TRACK_READY', trackId });
+      // if this is the song we are waiting for, start it now
+      if (current() || !this.trackId) {
+        this.adoptTrack(trackId, title, new Blob([bytes], { type: mime || 'audio/mpeg' }), true);
+      }
+    } catch {
+      // the slow path is still running; say nothing alarming
+    } finally {
+      this.cloudPulls.delete(trackId);
+    }
   }
 
   /** Point playback at a complete track, wherever the bytes came from. */
@@ -735,6 +776,10 @@ export class P2PSpeakerClient {
       case 'YT':
         this.appliedSeq = Math.max(this.appliedSeq, m.seq);
         void this.applyYouTube(m.videoId, m.position, m.atHostTime, m.playing);
+        break;
+
+      case 'TRACK_URL':
+        void this.pullFromCloud(m.trackId, m.title, m.mime, m.url);
         break;
 
       case 'NEXT_HINT':
