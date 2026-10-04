@@ -16,7 +16,7 @@
     var p = location.pathname;
     var rest = p.indexOf(base) === 0 ? p.slice(base.length) : p.replace(/^\//, '');
     rest = rest.replace(/\/+$/, '');
-    var known = ['speaker', 'host', 'sound'];
+    var known = ['speaker', 'host', 'sound', 'mixer'];
     var target = known.indexOf(rest) >= 0 ? '#/' + rest : '#/';
     location.replace(base + target + location.search);
   })();
