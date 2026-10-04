@@ -90,17 +90,48 @@ export class WebAudioPlayer {
    */
   private elSource: MediaElementAudioSourceNode | null = null;
   private elAttached: HTMLAudioElement | null = null;
+  /** element waiting to be routed through the mixer once the context runs */
+  private pendingEl: HTMLAudioElement | null = null;
+  private attachTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * A suspended context becomes 'running' only after a user gesture, and the
+   * gesture can happen seconds after playback was requested. Poll until it
+   * does (or until the element is gone), then route it through the strip.
+   */
+  private armAttachRetry() {
+    if (this.attachTimer) return;
+    this.attachTimer = setInterval(() => {
+      const el = this.pendingEl;
+      if (!el) { if (this.attachTimer) clearInterval(this.attachTimer); this.attachTimer = null; return; }
+      if (this.ctx.state === 'running') this.attachElement(el);
+    }, 500);
+  }
+
   attachElement(el: HTMLAudioElement): boolean {
     if (this.elAttached === el) return true;
     // Careful: once an element is routed into Web Audio it is SILENT while
     // the context is suspended. Only take it over when the context is
     // actually running, so a phone can never end up muted by the mixer.
-    if (this.ctx.state !== 'running') { void this.ctx.resume().catch(() => {}); return false; }
+    if (this.ctx.state !== 'running') {
+      // Remember it and keep trying. This used to just give up, and on a real
+      // phone that is the normal case: the element starts playing while the
+      // context is still suspended, the one attach attempt fails, and the
+      // element then plays around the mixer FOREVER — which is exactly why
+      // bass/echo/treble appeared to do nothing on a phone while the
+      // headless tests (context already running) passed.
+      this.pendingEl = el;
+      void this.ctx.resume().catch(() => {});
+      this.armAttachRetry();
+      return false;
+    }
     try {
       this.elSource?.disconnect();
       this.elSource = this.ctx.createMediaElementSource(el);
       this.elSource.connect(this.mixer.input);
       this.elAttached = el;
+      this.pendingEl = null;
+      if (this.attachTimer) { clearInterval(this.attachTimer); this.attachTimer = null; }
       return true;
     } catch {
       // already attached to another context, or the browser refused: the

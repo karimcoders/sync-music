@@ -760,3 +760,21 @@ are never told to stop in the first place.
 ✓ the host came back still playing, and found its speakers again
 ✓ still in sync after the refresh: 10 ms apart
 ```
+
+## Why the mixer did nothing on a real phone
+
+`WebAudioPlayer.attachElement()` routes the `<audio>` element into the channel
+strip (EQ → echo → limiter → level). It refuses to do that while the
+AudioContext is suspended, because an element routed into a suspended context is
+silent — a sensible guard. The bug was that it refused *once* and never tried
+again.
+
+On a desktop test the context is already running, so the attach succeeded and
+`mixer-yt-e2e` measured a healthy 22.2 dB of bass swing. On a phone the normal
+order is the opposite: the element starts, the context is still suspended
+waiting for the tap, the single attach attempt fails — and from then on the
+sound reaches the speaker *around* the mixer. Every slider moved a node that
+nothing was connected to.
+
+The player now remembers the element in `pendingEl` and polls every 500 ms until
+`ctx.state === 'running'`, then attaches and clears the timer.
