@@ -1,6 +1,8 @@
 import Peer, { DataConnection } from 'peerjs';
 import { getTrack, putTrack, trackIds } from './speakerCache';
 import { WebAudioPlayer } from './bufferPlayer';
+import { MixerChannel, loadSettings, saveSettings, type MixerSettings } from '../audio/mixer';
+import { createPlayer, type YtHandle } from '../audio/youtube';
 
 import { ClockSync, DriftController, projectPosition } from '@sync-music/sync-engine';
 import { SILENT_WAV, type UiState } from '../client';
@@ -325,9 +327,158 @@ export class P2PSpeakerClient {
     if (this.transportPlaying) this.catchUp();
   }
 
+  /* ------------------------------ YouTube ------------------------------- */
+
+  private yt: YtHandle | null = null;
+  private ytId: string | null = null;
+  private ytTimer = 0;
+
+  /**
+   * Put this phone on the same video, at the same second.
+   *
+   * The audio cannot travel over our link, so what we synchronise is the
+   * position. YouTube's own player is the thing making sound here, and its
+   * seek is coarse, so we only correct when it is clearly out — chasing it
+   * harder would make it stutter for no gain.
+   */
+  private async applyYouTube(videoId: string | null, position: number, atHostTime: number, playing: boolean) {
+    if (!videoId) {
+      this.yt?.pause();
+      window.clearInterval(this.ytTimer);
+      this.set({ youtubeId: null, info: null });
+      return;
+    }
+    this.set({ youtubeId: videoId, trackTitle: 'YouTube', info: 'Loading the video on this phone…' });
+
+    // the music file and the video must never play at once
+    try { this.el?.pause(); } catch {}
+    this.wa?.pause();
+
+    const host = document.getElementById('yt-host');
+    if (!host) { this.set({ info: 'This page has no room for the video player.' }); return; }
+
+    if (!this.yt || this.ytId !== videoId) {
+      try {
+        if (!this.yt) {
+          this.yt = await createPlayer(host, videoId, (msg) => this.set({ error: msg, info: null }));
+        } else {
+          this.yt.load(videoId, 0);
+        }
+        this.ytId = videoId;
+      } catch {
+        this.set({ error: 'YouTube could not be loaded on this phone.', info: null });
+        return;
+      }
+    }
+
+    this.yt.setVolume(this.state.muted ? 0 : this.state.volume);
+    const at = () => (atHostTime - this.clock.now()) / 1000;
+    const target = () => position + Math.max(0, -at());
+
+    if (!playing) {
+      this.yt.seekTo(position);
+      this.yt.pause();
+      this.set({ playing: false, info: null });
+      return;
+    }
+
+    const lead = at();
+    if (lead > 0.05) {
+      this.yt.seekTo(position);
+      window.setTimeout(() => { this.yt?.play(); }, Math.max(0, lead * 1000 - 120));
+    } else {
+      this.yt.seekTo(target());
+      this.yt.play();
+    }
+    this.set({ playing: true, info: null, phase: 'PLAYING' });
+
+    // Android may still refuse to start a video without a fresh tap. Say so
+    // plainly and start on the next touch rather than sitting there silent.
+    window.setTimeout(() => {
+      if (!this.yt || this.yt.isPlaying()) return;
+      this.set({ info: 'Tap the screen once to let the video play on this phone.' });
+      const retry = () => {
+        this.yt?.play();
+        document.removeEventListener('pointerdown', retry);
+        this.set({ info: null });
+      };
+      document.addEventListener('pointerdown', retry);
+    }, 2500);
+
+    // keep it there; YouTube drifts and sometimes pauses itself
+    window.clearInterval(this.ytTimer);
+    this.ytTimer = window.setInterval(() => {
+      const p = this.yt;
+      if (!p || !this.state.youtubeId) return;
+      const want = position + (this.clock.now() - atHostTime) / 1000;
+      const err = p.position() - want;
+      if (!p.isPlaying()) { p.play(); return; }
+      // 400 ms: below this a YouTube seek costs more than the error
+      if (Math.abs(err) > 0.4) p.seekTo(want + 0.25);
+      this.set({ position: p.position(), driftMs: Math.round(err * 1000) });
+    }, 2000);
+    this.timers.push(this.ytTimer);
+  }
+
+  /* ------------------------------- mixer -------------------------------- */
+
+  /**
+   * Two independent channel strips, exactly like a desk: the music and the
+   * host's voice are mixed separately, because what makes a voice clear
+   * (cut bass, lift mid) is the opposite of what makes music full.
+   */
+  private voiceMixer: MixerChannel | null = null;
+  private micSource: MediaStreamAudioSourceNode | null = null;
+
+  get mixers() {
+    return {
+      music: this.wa?.mixer ?? null,
+      voice: this.voiceMixer,
+    };
+  }
+
+  /** Change one strip live and remember it on this phone. */
+  setMix(channel: 'music' | 'voice', next: Partial<MixerSettings>) {
+    const ch = channel === 'music' ? this.wa?.mixer : this.voiceMixer;
+    if (ch) {
+      ch.apply(next);
+      saveSettings(channel, ch.values);
+    } else {
+      // the strip does not exist yet (audio not enabled): remember anyway
+      saveSettings(channel, { ...loadSettings(channel), ...next } as MixerSettings);
+    }
+    this.set({});
+  }
+
+  mixOf(channel: 'music' | 'voice'): MixerSettings {
+    const ch = channel === 'music' ? this.wa?.mixer : this.voiceMixer;
+    return ch ? ch.values : loadSettings(channel);
+  }
+
   /** Play the host's live microphone alongside the music. */
   private micAudio: HTMLAudioElement | null = null;
   private playMic(stream: MediaStream) {
+    // Route the voice through its own channel strip when we have a context.
+    // The muted <audio> element still has to exist and be playing: Chrome
+    // will not pull a WebRTC stream that is only connected to Web Audio.
+    if (this.ctx) {
+      try {
+        if (!this.voiceMixer) {
+          this.voiceMixer = new MixerChannel(this.ctx);
+          this.voiceMixer.apply(loadSettings('voice'));
+        }
+        this.micSource?.disconnect();
+        this.micSource = this.ctx.createMediaStreamSource(stream);
+        this.micSource.connect(this.voiceMixer.input);
+        if (this.micAudio) { this.micAudio.srcObject = stream; this.micAudio.muted = true; void this.micAudio.play().catch(() => {}); }
+        this.set({ hostMic: true });
+        return;
+      } catch { /* fall through to the plain element */ }
+    }
+    this.playMicPlain(stream);
+  }
+
+  private playMicPlain(stream: MediaStream) {
     if (!this.micAudio) {
       const a = new Audio();
       (a as any).playsInline = true;
@@ -562,6 +713,11 @@ export class P2PSpeakerClient {
         this.appliedSeq = Math.max(this.appliedSeq, m.seq);
         this.set({ volume: m.volume });
         this.applyVolume();
+        break;
+
+      case 'YT':
+        this.appliedSeq = Math.max(this.appliedSeq, m.seq);
+        void this.applyYouTube(m.videoId, m.position, m.atHostTime, m.playing);
         break;
 
       case 'RENAME':

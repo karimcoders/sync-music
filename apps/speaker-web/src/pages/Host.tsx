@@ -5,12 +5,15 @@ import { detectMode, type Mode } from '../lib/mode';
 import { backendOrigin } from '../lib/backend';
 import JoinCard from '../components/JoinCard';
 import { lock } from '../lib/auth';
+import { videoIdFrom } from '../lib/audio/youtube';
 import { AppBar, Artwork, Button, Card, Icons, Equalizer, Field, Logo, Meter, Row, RoundBtn, Scrubber, Shell, Stack, Status, fmtTime , useMood } from '../ui';
 
 type AnyHost = HostClient | P2PHostClient;
 
 export default function Host({ go }: { go: (p: string) => void }) {
   const [s, setS] = useState<HostState | null>(null);
+  const [yt, setYt] = useState('');
+  const [ytErr, setYtErr] = useState<string | null>(null);
   useMood(!s?.sessionId ? 'idle' : s.error ? 'trouble' : s.transport?.state === 'playing' ? 'playing' : 'connected');
   const [mode, setMode] = useState<Mode | null>(null);
   const ref = useRef<AnyHost | null>(null);
@@ -225,6 +228,41 @@ export default function Host({ go }: { go: (p: string) => void }) {
             onClick={() => c?.autoNext(!s.transport?.autoNext)}
           >{s.transport?.autoNext ? 'On' : 'Off'}</button>
         </Row>
+      </Card>
+
+      <Card>
+        <div className="kicker">Play from YouTube</div>
+        <p className="tiny" style={{ marginTop: 6 }}>
+          Paste a YouTube link. Every phone opens that video itself and is held
+          to the same second — the audio cannot be sent over the local link, so
+          each phone streams its own copy and needs internet.
+        </p>
+        <Row style={{ marginTop: 10, gap: 8 }}>
+          <input
+            type="text" data-testid="yt-url" placeholder="https://youtu.be/…"
+            value={yt} onChange={(e) => setYt(e.target.value)} style={{ flex: 1 }}
+          />
+          <Button
+            testId="yt-play"
+            onClick={() => {
+              const id = videoIdFrom(yt);
+              if (!id) { setYtErr('That does not look like a YouTube link.'); return; }
+              setYtErr(null);
+              (c as any)?.youtube?.(id, 0, true);
+            }}
+          >PLAY</Button>
+        </Row>
+        <Row style={{ marginTop: 8 }}>
+          <a className="tiny" href="https://www.youtube.com/results?search_query=" target="_blank" rel="noreferrer">
+            Search on YouTube ↗
+          </a>
+          {s.youtubeId && (
+            <button className="chip" data-testid="yt-stop" onClick={() => (c as any)?.youtube?.(null)}>
+              Stop the video
+            </button>
+          )}
+        </Row>
+        {ytErr && <div className="err-text" style={{ marginTop: 8 }}>{ytErr}</div>}
       </Card>
 
       <Card>

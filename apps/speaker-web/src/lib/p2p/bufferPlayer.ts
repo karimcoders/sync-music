@@ -22,8 +22,12 @@
  * 10 MB per minute, stereo 44.1 kHz), and it needs the complete file, so a
  * track that is still arriving still plays through the element fallback.
  */
+import { MixerChannel, loadSettings } from '../audio/mixer';
+
 export class WebAudioPlayer {
   readonly ctx: AudioContext;
+  /** the music channel strip: EQ, echo, limiter, level */
+  readonly mixer: MixerChannel;
   private gain: GainNode;
   private buffer: AudioBuffer | null = null;
   private src: AudioBufferSourceNode | null = null;
@@ -39,7 +43,10 @@ export class WebAudioPlayer {
   constructor(ctx: AudioContext) {
     this.ctx = ctx;
     this.gain = ctx.createGain();
-    this.gain.connect(ctx.destination);
+    // everything the music plays goes through its own channel strip
+    this.mixer = new MixerChannel(ctx);
+    this.mixer.apply(loadSettings('music'));
+    this.gain.connect(this.mixer.input);
   }
 
   /** Decode a complete file. Throws if the browser cannot decode it. */

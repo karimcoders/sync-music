@@ -607,3 +607,25 @@ body[data-mood='connected'] .card.now-playing {
 @keyframes breathe {
   50% { box-shadow: 0 18px 50px hsl(var(--h1) 90% 45% / .5), inset 0 1px 0 rgba(255,255,255,.12); }
 }
+
+/* ------------------------------------------------------------- mixer */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.seg button {
+  background: transparent; border: 0; color: var(--dim); padding: 9px 16px;
+  font-size: 12px; letter-spacing: .12em; font-weight: 700; cursor: pointer;
+}
+.seg button.on {
+  background: linear-gradient(135deg, hsl(var(--h1) 92% 62%), hsl(var(--h2) 92% 60%));
+  color: #0a0714;
+}
+.knob { padding: 7px 0; }
+.knob input[type=range] { width: 100%; margin-top: 4px; }
+.meter { position: relative; height: 12px; border-radius: 8px; background: rgba(255,255,255,.08); overflow: hidden; }
+.meter .pos { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 8px; }
+.meter .peak { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; }
+.err-text { color: var(--err); font-size: 13px; }
+
+/* ---------------------------------------------------------- youtube */
+.yt-wrap { height: 0; overflow: hidden; border-radius: 18px; }
+.yt-wrap.on { height: 210px; border: 1px solid var(--line); }
+.yt-wrap iframe { width: 100%; height: 210px; border: 0; display: block; }

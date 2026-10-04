@@ -5,6 +5,7 @@ import { detectMode, roomParam, type Mode } from '../lib/mode';
 import { FIXED_ROOM_ID, roomIdFromCode } from '../lib/p2p/messages';
 import QrScanner from '../components/QrScanner';
 import { backendOrigin, setBackend } from '../lib/backend';
+import { setSpeaker } from '../lib/p2p/speakerSingleton';
 import { AppBar, Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime, Icons , useMood } from '../ui';
 
 type Discovered = { sessionId: string; name: string; speakerCount: number; hostOnline: boolean };
@@ -45,6 +46,8 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
       : new SpeakerClient((st) => setS({ ...st }));
     ref.current = c;
     (window as any).__syncClient = c; // diagnostics / e2e only
+    // only the direct-mode client owns a Web Audio graph to mix
+    setSpeaker(c instanceof P2PSpeakerClient ? c : null);
     setS({ ...c.state });
     let stopped = false;
     const look = async () => {
@@ -61,7 +64,7 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
     };
     void look();
     const iv = window.setInterval(() => { if (!ref.current?.state.sessionId) void look(); }, 4000);
-    return () => { stopped = true; window.clearInterval(iv); c.disconnect(); };
+    return () => { stopped = true; window.clearInterval(iv); setSpeaker(null); c.disconnect(); };
   }, [room, mode]);
 
   const c = ref.current;
@@ -72,6 +75,13 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
     return (
       <Shell tab="speaker" go={go}>
         <AppBar title="Speaker" sub="This phone" />
+
+      {s?.youtubeId && (
+        <div className="tiny dim" style={{ textAlign: 'center' }}>
+          Playing from YouTube on this phone — it needs internet, and alignment
+          is coarser than with a song file.
+        </div>
+      )}
         <Card>
           <Stack gap={14} style={{ alignItems: 'center', textAlign: 'center' }}>
             <div className="hero-emoji">📷</div>
@@ -118,6 +128,13 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
     return (
       <Shell tab="speaker" go={go}>
         <AppBar title="Speaker" sub="This phone" />
+
+      {s?.youtubeId && (
+        <div className="tiny dim" style={{ textAlign: 'center' }}>
+          Playing from YouTube on this phone — it needs internet, and alignment
+          is coarser than with a song file.
+        </div>
+      )}
         <Card>
           <Stack gap={14} style={{ alignItems: 'center', textAlign: 'center' }}>
             <div className="hero-emoji">{failed ? '📡' : searching ? '🔎' : sessions.length ? '🎧' : '🎧'}</div>

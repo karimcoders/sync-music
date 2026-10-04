@@ -21,6 +21,8 @@ export interface HostState {
   info: string | null;
   /** direct mode only: the host's microphone is live on every speaker */
   micOn?: boolean;
+  /** direct mode only: the video every phone is playing from YouTube */
+  youtubeId?: string | null;
 }
 
 const STORE = 'sync-music.host';

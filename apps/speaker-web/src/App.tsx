@@ -3,6 +3,7 @@ import Home from './pages/Home';
 import Host from './pages/Host';
 import Speaker from './pages/Speaker';
 import SoundCheck from './pages/SoundCheck';
+import MixerPage from './pages/Mixer';
 import HostLogin from './components/HostLogin';
 import { isUnlocked } from './lib/auth';
 
@@ -20,11 +21,31 @@ function currentPath() {
   return p.replace(/\/+$/, '') || '/';
 }
 
+/**
+ * The YouTube player needs a real element that exists BEFORE a video is
+ * announced, and it must survive page switches — so it lives here, outside
+ * the router, and is simply collapsed when there is no video.
+ */
+function YouTubeMount() {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    const t = window.setInterval(
+      () => setOn(!!(window as any).__syncClient?.state?.youtubeId), 500);
+    return () => window.clearInterval(t);
+  }, []);
+  return (
+    <div className={`yt-wrap ${on ? 'on' : ''}`}>
+      <div id="yt-host" />
+    </div>
+  );
+}
+
 export default function App() {
   const [path, setPath] = useState(currentPath());
   // The controller is locked away from guests; the gate lives at the route so
   // the player component itself never renders half-mounted.
   const [owner, setOwner] = useState(isUnlocked());
+  const mount = <YouTubeMount />;
 
   useEffect(() => {
     const onPop = () => setPath(currentPath());
@@ -40,12 +61,13 @@ export default function App() {
     window.scrollTo(0, 0);
   };
 
+  if (path === '/mixer') return <>{mount}<MixerPage go={go} /></>;
   if (path === '/host') {
     return owner
-      ? <Host go={go} />
-      : <HostLogin go={go} onUnlock={() => setOwner(true)} />;
+      ? <>{mount}<Host go={go} /></>
+      : <>{mount}<HostLogin go={go} onUnlock={() => setOwner(true)} /></>;
   }
-  if (path === '/speaker') return <Speaker go={go} />;
-  if (path === '/sound') return <SoundCheck go={go} />;
-  return <Home go={go} />;
+  if (path === '/speaker') return <>{mount}<Speaker go={go} /></>;
+  if (path === '/sound') return <>{mount}<SoundCheck go={go} /></>;
+  return <>{mount}<Home go={go} /></>;
 }

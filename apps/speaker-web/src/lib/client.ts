@@ -31,6 +31,8 @@ export interface UiState {
   info: string | null;
   /** the host's live microphone is coming through right now */
   hostMic?: boolean;
+  /** the YouTube video this phone is playing, if any */
+  youtubeId?: string | null;
 }
 
 const DEVICE_KEY = 'sync-music.deviceId';

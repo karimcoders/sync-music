@@ -474,3 +474,59 @@ room while the tests run. `p2p-e2e` therefore asserts *at least* N speakers.
 Measured: switch followed by every phone in 265 ms; a phone that had lost the
 file got it and caught up in 2.0 s; steady-state smoothness unchanged
 (0 rough steps, worst 15 ms).
+
+## A real mixer, and YouTube
+
+### The mixer (`/#/mixer`)
+
+Two independent channel strips — **MUSIC** and **VOICE** — because what makes
+a voice clear (cut bass, lift mid) is the opposite of what makes music full.
+Each strip is the same chain a hardware channel gives you, built from Web
+Audio nodes and inserted in front of the speaker:
+
+```
+in → bass (low shelf 160 Hz) → mid (bell 1.2 kHz) → treble (high shelf 3.8 kHz)
+   → echo send → delay + feedback → limiter → level → out
+```
+
+* **Level goes to 200 %**, which is real amplification, so a limiter sits
+  after it and the screen reports how many dB it is holding back. Past that a
+  phone speaker simply runs out of air — the app says so rather than
+  pretending.
+* **Echo** is a delay line with feedback (amount / time / repeats), i.e. a
+  slap or hall you dial in — not a convolution of a real room.
+* Presets: Flat, Bass, Vocal, Speech, Party, Hall, Slapback.
+* **Mic test** on the VOICE strip shows this phone's own input level with a
+  peak hold, monitored silently so the phone cannot howl.
+* Settings are per phone and remembered, so the one with the tinny speaker
+  keeps its own curve. They change the sound live, on that phone only.
+
+Proven, not asserted: `tools/mixer-yt-e2e.mjs` pushes an 80 Hz tone through
+the actual strip and measures the output with an analyser — bass at −12 dB vs
++12 dB differs by **22.2 dB**, and the settings survive a reload.
+
+### YouTube (`Play from YouTube` on the host)
+
+People search songs on YouTube, so this had to work. It does — but not the way
+it might look.
+
+**A web page cannot take the audio out of a YouTube player.** The player is a
+sandboxed iframe, the stream is protected, and capturing it would break both
+the browser's rules and YouTube's. So instead of moving the audio, the app
+moves the **time**: the host paste a link, every phone opens that same video
+itself, and each one is held to the same second on the host's clock.
+
+Honest consequences, all of them stated in the UI too:
+
+* every phone needs internet for this (a song file, by contrast, is handed
+  out over the local link and then plays offline);
+* alignment is coarser — YouTube's seek lands on a keyframe, so corrections
+  only happen above 400 ms;
+* a video whose owner disabled embedding, or that is age-restricted, cannot
+  play here; the phone says which, instead of failing silently;
+* ads are per phone and will pull that phone out of sync until they end;
+* there is no in-app search, because that needs a YouTube API key and an
+  account. The host screen links out to YouTube search so you can copy a link.
+
+Measured live in `tools/mixer-yt-e2e.mjs`: two phones put on the same video,
+playing, **35 ms apart**.

@@ -40,6 +40,12 @@ export type P2PMessage =
   | { type: 'PAUSE'; seq: number; position: number }
   | { type: 'STOP'; seq: number }
   | { type: 'SEEK'; seq: number; trackId: string; position: number; applyAt: number }
+  /**
+   * Play from YouTube. The audio is NOT carried over this link — it cannot
+   * be. Every phone opens the same video itself and is told where to be on
+   * the host's clock. See lib/audio/youtube.ts.
+   */
+  | { type: 'YT'; seq: number; videoId: string | null; position: number; atHostTime: number; playing: boolean }
   | { type: 'RESYNC'; seq: number; trackId: string; position: number; atHostTime: number; playing: boolean }
   | { type: 'VOLUME'; seq: number; volume: number }
   | { type: 'RENAME'; name: string }

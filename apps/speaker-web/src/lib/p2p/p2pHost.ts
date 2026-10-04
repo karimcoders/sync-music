@@ -394,6 +394,7 @@ export class P2PHostClient {
         // do not have to make — that is what makes the next PLAY instant.
         (m.cached ?? []).forEach((id) => c.sent.add(id));
         this.prefetch(peerId);
+        this.sendYtTo(c.conn);
         break;
       }
       case 'STATUS': {
@@ -891,6 +892,34 @@ export class P2PHostClient {
     this.play(this.transport.playlist[i].id, 0);
   }
   playTrack(id: string) { this.play(id, 0); }
+
+  /* ------------------------------- YouTube ------------------------------ */
+
+  /**
+   * Hand every phone the same video and the same clock. We cannot send the
+   * audio (see lib/audio/youtube.ts), so each phone plays its own stream at
+   * the position we name.
+   */
+  youtube(videoId: string | null, position = 0, playing = true) {
+    this.ytState = { videoId, position, atHostTime: Date.now() + 1200, playing };
+    this.lastCommandAt = Date.now();
+    this.broadcastReliable({ type: 'YT', seq: ++this.cmdSeq, ...this.ytState });
+    this.set({ youtubeId: videoId, info: videoId ? null : this.state.info });
+  }
+
+  youtubePause(position: number) {
+    if (!this.ytState.videoId) return;
+    this.ytState = { ...this.ytState, position, atHostTime: Date.now(), playing: false };
+    this.broadcastReliable({ type: 'YT', seq: ++this.cmdSeq, ...this.ytState });
+  }
+
+  /** Keep late joiners on the video too. */
+  private ytState: { videoId: string | null; position: number; atHostTime: number; playing: boolean } =
+    { videoId: null, position: 0, atHostTime: 0, playing: false };
+  private sendYtTo(conn: DataConnection) {
+    if (!this.ytState.videoId) return;
+    this.send(conn, { type: 'YT', seq: ++this.cmdSeq, ...this.ytState });
+  }
 
   volume(v: number) {
     this.transport = { ...this.transport, volume: v };
