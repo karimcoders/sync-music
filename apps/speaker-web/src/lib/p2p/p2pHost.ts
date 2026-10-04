@@ -72,6 +72,37 @@ export class P2PHostClient {
     // Measure every speaker's latency ourselves — the correction loop below is
     // only trustworthy if the round-trip is known on THIS clock.
     this.timers.push(window.setInterval(() => this.broadcast({ type: 'PING', t1: Date.now() }), 2000));
+    this.timers.push(window.setInterval(() => this.reapSilentPeers(), 5000));
+  }
+
+  /**
+   * Forget phones that stopped answering.
+   *
+   * The room id is fixed and the broker is public, so a tab that was closed
+   * badly — or someone else's stale entry — can linger as an "open"
+   * connection. PeerJS does not reliably report a close. Left alone they are
+   * counted as speakers, and worse, every song is streamed to them, which
+   * starves the phones that are really in the room.
+   *
+   * Everyone answers our PING every 2 s, so 15 s of silence means gone.
+   */
+  private reapSilentPeers() {
+    const now = Date.now();
+    [...this.conns.entries()].forEach(([peerId, c]) => {
+      // a channel that opened but never introduced itself is a spare dial
+      const introduced = this.deviceOf.has(peerId);
+      const last = c.info?.lastSeen ?? 0;
+      const quiet = now - last;
+      if (introduced ? quiet < 15000 : quiet < 10000) return;
+      try { c.conn.close(); } catch {}
+      this.conns.delete(peerId);
+      this.deviceOf.delete(peerId);
+      this.sending.delete(peerId);
+      this.urgent.delete(peerId);
+      this.clockReady.delete(peerId);
+      this.latency.delete(peerId);
+      this.publishSpeakers();
+    });
   }
 
   private set(p: Partial<HostState>) { this.state = { ...this.state, ...p }; this.onChange(this.state); }
@@ -337,13 +368,34 @@ export class P2PHostClient {
         // T2 = receive, T3 = send. Same four-timestamp exchange as the server.
         this.send(c.conn, { type: 'PONG', t1: m.t1, t2: Date.now(), t3: Date.now() });
         break;
-      case 'HELLO':
-        if (m.name) { c.info = { ...c.info, name: m.name }; this.publishSpeakers(); }
+      case 'HELLO': {
+        // One phone, one speaker.
+        //
+        // A joining phone dials several room slots at once (that is what
+        // makes joining fast), and more than one of those dials can succeed.
+        // Counting them separately inflated "Connected Speakers" and, far
+        // worse, streamed the song several times to the same phone — which
+        // is bandwidth the phones that really are in the room needed.
+        this.deviceOf.set(peerId, m.deviceId);
+        [...this.deviceOf.entries()].forEach(([other, dev]) => {
+          if (other === peerId || dev !== m.deviceId) return;
+          const dup = this.conns.get(other);
+          if (dup) { try { dup.conn.close(); } catch {} }
+          this.conns.delete(other);
+          this.deviceOf.delete(other);
+          this.sending.delete(other);
+          this.urgent.delete(other);
+          this.latency.delete(other);
+          this.clockReady.delete(other);
+        });
+        if (m.name) { c.info = { ...c.info, name: m.name }; }
+        this.publishSpeakers();
         // Everything this phone kept from an earlier session is a transfer we
         // do not have to make — that is what makes the next PLAY instant.
         (m.cached ?? []).forEach((id) => c.sent.add(id));
         this.prefetch(peerId);
         break;
+      }
       case 'STATUS': {
         (m.cached ?? []).forEach((id) => c.sent.add(id));
         // strict: a settled data channel on the same LAN sits in the low ms range
@@ -390,10 +442,20 @@ export class P2PHostClient {
         }
         break;
       }
-      case 'TRACK_WANT':
-        // That phone is on the wrong song — send it the whole file now.
-        void this.pushTrackTo(peerId, m.trackId);
+      case 'TRACK_WANT': {
+        // That phone is on the wrong song and cannot play anything until it
+        // has this file. Jump the queue, and ignore our own bookkeeping that
+        // says we already sent it — plainly it did not arrive, and silently
+        // doing nothing left the phone stuck on "Switching to the new song".
+        const c0 = this.conns.get(peerId);
+        // Already on its way? Then restarting it would throw away everything
+        // sent so far and make the phone wait longer, not less.
+        if (this.sending.get(peerId) === m.trackId) break;
+        if (c0) c0.sent.delete(m.trackId);
+        this.urgent.set(peerId, m.trackId);
+        void this.pushTrackTo(peerId, m.trackId, true);
         break;
+      }
       case 'TRACK_NEED':
         void this.resendChunks(peerId, m.trackId, m.indexes);
         break;
@@ -430,7 +492,12 @@ export class P2PHostClient {
   }
 
   private publishSpeakers() {
-    const speakers = [...this.conns.values()].map((c) => c.info);
+    // A phone counts as a speaker once it has introduced itself. The spare
+    // dials a joining phone makes can open a channel and never say HELLO;
+    // showing those as extra speakers was simply wrong.
+    const speakers = [...this.conns.entries()]
+      .filter(([peerId]) => this.deviceOf.has(peerId))
+      .map(([, c]) => c.info);
     const drift = speakers.filter((s) => s.state === 'playing');
     this.set({
       speakers,
@@ -505,8 +572,19 @@ export class P2PHostClient {
    * stuttering felt like.
    */
   private queue: Promise<void> = Promise.resolve();
-  private pushTrackTo(peerId: string, trackId?: string) {
-    const run = () => this.sendTrack(peerId, trackId);
+  /**
+   * The song a phone is waiting on RIGHT NOW. Prefetching the rest of the
+   * playlist must never make somebody wait to hear the song that is actually
+   * playing, so an in-flight background transfer is abandoned for this one
+   * and picked up again afterwards.
+   */
+  private urgent = new Map<string, string>();
+  /** the file currently streaming to each phone */
+  private sending = new Map<string, string>();
+  /** which physical phone is behind each peer connection */
+  private deviceOf = new Map<string, string>();
+  private pushTrackTo(peerId: string, trackId?: string, force = false) {
+    const run = () => this.sendTrack(peerId, trackId, force);
     this.queue = this.queue.then(run, run);
     return this.queue;
   }
@@ -540,16 +618,18 @@ export class P2PHostClient {
     order.forEach((t) => void this.pushTrackTo(peerId, t.id));
   }
 
-  private async sendTrack(peerId: string, trackId?: string) {
+  private async sendTrack(peerId: string, trackId?: string, force = false) {
     const c = this.conns.get(peerId);
     const cur = trackId
       ? this.transport.playlist.find((t) => t.id === trackId)
       : this.transport.playlist[this.transport.trackIndex];
     if (!c || !cur) return;
     const f = this.files.get(cur.id);
-    if (!f || c.sent.has(cur.id)) return;
+    if (!f) return;
+    if (c.sent.has(cur.id) && !force) return;
     c.sent.add(cur.id);
 
+    this.sending.set(peerId, cur.id);
     const CHUNK = 32 * 1024;
     const total = Math.ceil(f.bytes.byteLength / CHUNK);
     this.send(c.conn, {
@@ -558,7 +638,11 @@ export class P2PHostClient {
     });
 
     for (let i = 0; i < total; i++) {
-      if (!this.conns.has(peerId) || !c.conn.open) { c.sent.delete(cur.id); return; }
+      if (!this.conns.has(peerId) || !c.conn.open) { c.sent.delete(cur.id); this.sending.delete(peerId); return; }
+      // somebody is waiting on a different song: drop this background
+      // transfer and let the urgent one run
+      const want = this.urgent.get(peerId);
+      if (want && want !== cur.id) { c.sent.delete(cur.id); this.sending.delete(peerId); return; }
       // Two things matter and they pull in opposite directions: a command
       // must never queue behind megabytes of audio, and the track still has
       // to arrive quickly. So the channel is kept almost empty for a moment
@@ -574,6 +658,12 @@ export class P2PHostClient {
         type: 'TRACK_CHUNK', trackId: cur.id, index: i,
         bytes: f.bytes.slice(i * CHUNK, Math.min((i + 1) * CHUNK, f.bytes.byteLength)),
       });
+    }
+    if (this.sending.get(peerId) === cur.id) this.sending.delete(peerId);
+    if (this.urgent.get(peerId) === cur.id) {
+      this.urgent.delete(peerId);
+      // the queue-jumped song is there; resume filling the rest of the playlist
+      this.prefetch(peerId);
     }
   }
 

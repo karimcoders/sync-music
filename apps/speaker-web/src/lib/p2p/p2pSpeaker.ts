@@ -258,9 +258,9 @@ export class P2PSpeakerClient {
       .then((hit) => {
         if (this.wantedTrack !== trackId) return;     // the host moved on again
         if (hit) { this.adoptTrack(trackId, hit.title, new Blob([hit.bytes], { type: hit.mimeType })); return; }
-        this.send({ type: 'TRACK_WANT', trackId });
+        this.askForTrack(trackId);
       })
-      .catch(() => this.send({ type: 'TRACK_WANT', trackId }));
+      .catch(() => this.askForTrack(trackId));
     return false;
   }
 
@@ -277,6 +277,27 @@ export class P2PSpeakerClient {
     if (this.wantedTrack) return this.wantedTrack === trackId;
     if (this.trackId) return this.trackId === trackId;
     return true;                       // nothing playing yet: first one wins
+  }
+
+  /**
+   * Ask, and keep asking.
+   *
+   * One request is not enough: it can be lost while the channel is draining
+   * megabytes, or the host may wrongly believe we already hold the file. A
+   * phone that stops asking sits on "Switching to the new song" forever —
+   * which is exactly what happened on a real phone.
+   */
+  private wantTimer = 0;
+  private askForTrack(trackId: string) {
+    // it is already arriving — asking again only restarts it
+    if (this.incoming?.trackId !== trackId) this.send({ type: 'TRACK_WANT', trackId });
+    window.clearInterval(this.wantTimer);
+    this.wantTimer = window.setInterval(() => {
+      if (this.wantedTrack !== trackId) { window.clearInterval(this.wantTimer); return; }
+      if (this.incoming?.trackId === trackId) return;   // it is arriving, be patient
+      this.send({ type: 'TRACK_WANT', trackId });
+    }, 2500);
+    this.timers.push(this.wantTimer);
   }
 
   /** Point playback at a complete track, wherever the bytes came from. */
@@ -419,7 +440,7 @@ export class P2PSpeakerClient {
           parts: new Array(m.chunks), got: 0,
         };
         if (this.shouldBeCurrent(m.trackId)) {
-          this.set({ trackTitle: m.title, info: m.chunks > 8 ? 'Receiving the track…' : null, bufferedPct: 0 });
+          this.set({ trackTitle: m.title, info: m.chunks > 8 ? 'Receiving the new song…' : null, bufferedPct: 0 });
         }
         this.lastChunkAt = Date.now();
         this.startChunkChase();
@@ -432,7 +453,14 @@ export class P2PSpeakerClient {
         inc.parts[m.index] = m.bytes;
         inc.got++;
         this.lastChunkAt = Date.now();
-        this.set({ bufferedPct: Math.round((inc.got / inc.chunks) * 100) });
+        const pct = Math.round((inc.got / inc.chunks) * 100);
+        // Show the song arriving. A frozen "Switching…" looks broken even
+        // when the transfer is healthy.
+        this.set({
+          bufferedPct: pct,
+          info: this.wantedTrack === inc.trackId || this.trackId === null
+            ? `Getting the new song… ${pct}%` : this.state.info,
+        });
         if (inc.got < inc.chunks) break;
 
         const blob = new Blob(inc.parts as ArrayBuffer[], { type: inc.mime || 'audio/mpeg' });
@@ -901,14 +929,25 @@ export class P2PSpeakerClient {
    * force an exact alignment if it is still out — this window is short and
    * nobody is settled into the song yet.
    */
+  private joinTimers: number[] = [];
+  private lastArmAt = 0;
   private armJoinChecks() {
+    // STATE arrives continuously and every one of them used to re-arm these
+    // checks, so the "short window after a join" never ended and the forced
+    // corrections became a steady chop. Arm them once per join, and never
+    // more than once every 3 s.
+    if (Date.now() - this.lastArmAt < 3000) return;
+    this.lastArmAt = Date.now();
+    this.joinTimers.forEach((t) => window.clearTimeout(t));
+    this.joinTimers = [];
     for (const delay of [700, 1700]) {
-      this.timers.push(window.setTimeout(() => {
+      this.joinTimers.push(window.setTimeout(() => {
         if (!this.transportPlaying || !this.wa?.ready || !this.audioEnabled) return;
         const err = this.wa.currentTime - this.targetPosition();
         if (Math.abs(err) > 0.04) { this.resyncExact(); this.smoothErr = 0; }
       }, delay));
     }
+    this.timers.push(...this.joinTimers);
   }
 
   private resyncExact() {

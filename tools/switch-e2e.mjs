@@ -89,6 +89,50 @@ console.log(`  spread on the new song: ${spread.toFixed(1)} ms`);
 if (spread > 250) fail(`the new song is not in sync: ${spread.toFixed(0)} ms apart`);
 else ok(`the new song is in sync: ${spread.toFixed(0)} ms apart`);
 
+// The stuck case from a real phone: the host believes it already sent the
+// file (its bookkeeping says so) but the phone does not have it. The phone
+// asks with TRACK_WANT; if the host trusts its bookkeeping and stays quiet,
+// the phone sits on "Switching to the new song" forever.
+{
+  await host.getByTestId('play-track-0').click();
+  await host.waitForTimeout(3000);
+
+  // make the phones forget song 2 AND make the host believe they have it
+  const gone = await host.evaluate(() => {
+    const h = window.__syncHost;
+    const ids = h.transport.playlist.map((t) => t.id);
+    const second = ids[1];
+    h.conns.forEach((c) => c.sent.add(second));
+    return second;
+  });
+  await Promise.all(speakers.map((p) => p.evaluate(async (id) => {
+    await new Promise((res) => {
+      const r = indexedDB.open('sync-music-speaker');
+      r.onsuccess = () => {
+        const db = r.result;
+        const tx = db.transaction('tracks', 'readwrite');
+        tx.objectStore('tracks').delete(id);
+        tx.oncomplete = () => res();
+        tx.onerror = () => res();
+      };
+      r.onerror = () => res();
+    });
+    window.__syncClient.haveTrack = null;
+  }, gone)));
+
+  const t1 = Date.now();
+  await host.getByTestId('play-track-1').click();
+  const want = await host.getByTestId('now-title').innerText();
+  let got = 0;
+  for (let i = 0; i < 60; i++) {
+    const now = await Promise.all(speakers.map(title));
+    if (now.every((t) => t === want)) { got = Date.now() - t1; break; }
+    await host.waitForTimeout(250);
+  }
+  if (!got) fail('a phone stayed stuck on "Switching to the new song" — the host refused to resend');
+  else ok(`a phone that lost the file got it anyway, in ${got} ms`);
+}
+
 console.log(bad ? '\nSOME CHECKS FAILED' : '\nALL CHECKS PASSED');
 await b.close();
 process.exit(bad ? 1 : 0);

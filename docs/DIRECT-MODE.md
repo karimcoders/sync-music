@@ -438,3 +438,39 @@ now get two forced alignment checks (700 ms and 1700 ms after joining),
 because the deliberately slow steady-state loop was leaving them behind for
 far too long. Late-join spread fell from ~400 ms to ~150 ms, post-refresh to
 ~20 ms.
+
+## Stuck on "Switching to the new song"
+
+A real phone sat on that message forever. Three separate causes, all fixed:
+
+1. **The host refused to resend.** It keeps a record of which files it has
+   already pushed to each phone (including what the phone itself reported as
+   cached). A `TRACK_WANT` from a phone that plainly does *not* have the file
+   hit that record and was dropped silently. A want now forces the send and
+   jumps the queue ahead of background prefetching.
+2. **The phone asked once.** A single request can be lost while the channel is
+   draining megabytes. It now repeats every 2.5 s until the file is arriving,
+   and the screen shows `Getting the new song… NN%` instead of a frozen line.
+3. **Restarting a transfer that was already running.** A want for a file
+   already streaming is now ignored, because restarting it throws away
+   everything sent so far and makes the wait longer.
+
+Two more things found while chasing it, both worth having on their own:
+
+* **One phone was being counted as several speakers.** A joining phone dials
+  four room slots at once; more than one can open. The host now keys speakers
+  by the device id in HELLO, drops the duplicates, and only counts a
+  connection once it has introduced itself. Besides the wrong count, it was
+  streaming each song to the same phone several times — bandwidth the real
+  phones needed.
+* **Silent connections are reaped** after 15 s without a reply (10 s if they
+  never said HELLO). The room id is fixed and the broker is public, so stale
+  entries do appear.
+
+Note for anyone reading the e2e output: the room is deliberately one fixed
+public id, so other people's phones — including the owner's — can be in the
+room while the tests run. `p2p-e2e` therefore asserts *at least* N speakers.
+
+Measured: switch followed by every phone in 265 ms; a phone that had lost the
+file got it and caught up in 2.0 s; steady-state smoothness unchanged
+(0 rough steps, worst 15 ms).
