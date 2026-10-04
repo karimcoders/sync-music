@@ -286,7 +286,13 @@ export class P2PSpeakerClient {
     // order the network gives them.
     if (this.hostTrackId) return this.hostTrackId === trackId;
     if (this.trackId) return this.trackId === trackId;
-    return false;                      // we do not know yet: keep it, play nothing
+    // Nothing playing and the host has not named a song yet (the files
+    // usually arrive before the first PLAY): take it, so the phone is ready
+    // the instant the command comes. If it turns out to be the wrong song,
+    // the next transport message names the right one and ensureTrack swaps
+    // it — that is what stops phones playing different songs, not refusing
+    // the file here.
+    return true;
   }
 
   /**
@@ -519,14 +525,16 @@ export class P2PSpeakerClient {
     this.chaseTimer = window.setInterval(() => {
       const inc = this.incoming;
       if (!inc) { window.clearInterval(this.chaseTimer); return; }
-      if (Date.now() - this.lastChunkAt < 2500) return;
+      // 2.5 s of waiting before asking again was most of the stall a phone
+      // showed at "93%"; the hole is obvious long before that.
+      if (Date.now() - this.lastChunkAt < 800) return;
       const missing: number[] = [];
       for (let i = 0; i < inc.chunks && missing.length < 400; i++) if (!inc.parts[i]) missing.push(i);
       if (!missing.length) return;
       this.lastChunkAt = Date.now();
       this.set({ info: `Re-requesting ${missing.length} missing piece(s) of the track…` });
       this.send({ type: 'TRACK_NEED', trackId: inc.trackId, indexes: missing });
-    }, 1200);
+    }, 400);
     this.timers.push(this.chaseTimer);
   }
 
@@ -1171,7 +1179,8 @@ export class P2PSpeakerClient {
       this.joinTimers.push(window.setTimeout(() => {
         if (!this.transportPlaying || !this.wa?.ready || !this.audioEnabled) return;
         const err = this.wa.currentTime - this.targetPosition();
-        if (Math.abs(err) > 0.04) { this.resyncExact(); this.smoothErr = 0; }
+        // never while a file is still arriving: the reading is noise then
+        if (Math.abs(err) > 0.04 && !this.incoming) { this.resyncExact(); this.smoothErr = 0; }
       }, delay));
     }
     this.timers.push(...this.joinTimers);
@@ -1242,9 +1251,21 @@ export class P2PSpeakerClient {
       if (Math.abs(e) > (settling ? 0.05 : 0.15)) {
         this.bigErrors = Math.sign(e) === Math.sign(this.lastErr) ? this.bigErrors + 1 : 1;
         this.lastErr = e;
+        // Settling used to restart on a SINGLE reading every 0.9 s, which on
+        // a busy phone (one still receiving the rest of the playlist) meant
+        // five restarts in the first eight seconds — audible chopping, and
+        // the measurements agreed: four rough steps, worst 87 ms. Two
+        // agreeing readings, and a faster rate ramp below, close the same
+        // gap without a single interruption.
         const need = settling ? 1 : urgent ? 2 : 3;
         const gap = settling ? 900 : urgent ? 2500 : 6000;
-        if (this.bigErrors >= need && since > gap) {
+        // While this phone is still receiving a file, its own main thread
+        // stalls on every arriving chunk, so the position reading is noisy —
+        // and restarting playback on a noisy reading is precisely the
+        // chopping people hear. Ride it out on the rate change; the transfer
+        // is over in seconds and the loop corrects properly then.
+        const busy = !!this.incoming;
+        if (this.bigErrors >= need && since > gap && !busy) {
           this.resyncExact();
           this.smoothErr = 0;
           this.set({ driftMs: Math.round(e * 1000), phase: 'PLAYING', position: a.currentTime });
@@ -1256,7 +1277,10 @@ export class P2PSpeakerClient {
 
       // Proportional, capped at 0.5%: closes 100 ms in about 20 s without a
       // pitch change anyone can hear, and never interrupts the waveform.
-      const rate = Math.abs(e) < 0.012 ? 1 : 1 - Math.max(-0.005, Math.min(0.005, e * 0.05));
+      // While settling, allow a 2 % ramp: it closes 100 ms in five seconds
+      // and a brief 2 % pitch shift is far less noticeable than a restart.
+      const cap = settling ? 0.02 : 0.005;
+      const rate = Math.abs(e) < 0.012 ? 1 : 1 - Math.max(-cap, Math.min(cap, e * (settling ? 0.25 : 0.05)));
       a.playbackRate = rate;
       this.set({ position: a.currentTime, driftMs: Math.round(e * 1000), phase: 'PLAYING' });
       return;

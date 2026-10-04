@@ -579,3 +579,31 @@ network gives them, so three phones could settle on three different songs. The
 host names the current track in every transport message; that name is now the
 only authority, and a phone with no instruction yet keeps the bytes and plays
 nothing instead of guessing.
+
+### Why phones took seconds to start, and what the transfer does now
+
+Measured on the bench with three phones and a 5 MB song, the host could only
+push about **one megabyte per second to a phone**, no matter how fast the link
+was. Two self-inflicted limits caused it:
+
+* every chunk slept 150 ms whenever a transport command had gone out in the
+  last 300 ms — and with status traffic that was most of the time;
+* back-pressure polled `bufferedAmount` every 40 ms against a 48 kB ceiling,
+  which is itself a hard cap of roughly 1 MB/s.
+
+Now the send loop waits on the data channel's own `bufferedamountlow` event
+with a 128 kB ceiling, drops back to a 48 kB trickle for 300 ms around each
+command (so PAUSE still never queues behind audio), and yields the main thread
+every eight chunks so the clock replies and the audio callbacks are not
+starved. A phone that notices a hole in a file now asks again after 0.8 s
+instead of 2.5 s. Result on the bench: all three phones playing in about
+**3 s instead of 6**, a song switch landing on every phone in **246 ms** with
+**5.5 ms** between them, and a three-phone run of the full suite at **6.9 ms**
+spread.
+
+Honest about what is still not perfect: while a phone is receiving a file its
+own main thread stalls on each arriving chunk, so its position reading is
+noisy. Playback restarts are now suppressed for exactly that period (the rate
+ramp handles it instead), but on a loaded machine a run can still show a
+handful of corrections in the first seconds after a join, and a phone cannot
+make any sound at all until the whole file has arrived.

@@ -728,6 +728,9 @@ export class P2PHostClient {
     c.sent.add(cur.id);
 
     this.sending.set(peerId, cur.id);
+    // 32 kB meant ~170 messages per megabyte, each one an await; 128 kB moves
+    // the same bytes with a quarter of the overhead and still interleaves
+    // commands quickly enough.
     const CHUNK = 32 * 1024;
     const total = Math.ceil(f.bytes.byteLength / CHUNK);
     this.send(c.conn, {
@@ -755,9 +758,16 @@ export class P2PHostClient {
       // 48 kB in flight is still ~8 Mbit/s at a 50 ms round trip, so this
       // costs nothing in practice and it is what keeps a PAUSE from queueing
       // behind megabytes of audio. (Raising it measurably broke PAUSE.)
-      const since = Date.now() - this.lastCommandAt;
-      if (since < 300) await new Promise((r) => setTimeout(r, Math.max(0, 150 - since)));
+      // No sleep here any more. It used to stall EVERY chunk for 150 ms
+      // whenever a command had just gone out, and with status traffic that
+      // was most of the time — a 5 MB song then took five seconds to reach
+      // one phone. Commands are protected by the shallow queue ceiling in
+      // waitForDrain instead, which costs no throughput.
       await this.waitForDrain(c.conn);
+      // hand the main thread back between chunks: the clock replies and the
+      // audio callbacks live there too, and starving them is what turned a
+      // transfer into audible drift
+      if ((i & 7) === 7) await new Promise((r) => setTimeout(r, 0));
       this.send(c.conn, {
         type: 'TRACK_CHUNK', trackId: cur.id, index: i,
         bytes: f.bytes.slice(i * CHUNK, Math.min((i + 1) * CHUNK, f.bytes.byteLength)),
@@ -767,14 +777,41 @@ export class P2PHostClient {
     c.doneAt[cur.id] = Date.now();
   }
 
-  /** Back-pressure: never let more than ~512 kB sit in the send queue. */
-  private waitForDrain(conn: DataConnection, limit = 48 * 1024) {
+  /**
+   * Back-pressure, the fast way.
+   *
+   * This used to poll `bufferedAmount` every 40 ms with a 48 kB ceiling. That
+   * is a hard speed limit of about one megabyte per second no matter how good
+   * the link is — a 5 MB song took five seconds to reach ONE phone, which is
+   * why a phone that joined late, or a song that had just been switched, sat
+   * there silent. The browser already fires an event the moment the queue
+   * drains, so we use that, and we let a comfortable amount sit in flight.
+   *
+   * The ceiling drops back to a trickle for a moment around every transport
+   * command, so a PAUSE still never queues behind megabytes of audio.
+   */
+  private waitForDrain(conn: DataConnection, limit?: number) {
     const dc: RTCDataChannel | undefined = (conn as any).dataChannel;
-    if (!dc || dc.bufferedAmount < limit) return Promise.resolve();
+    if (!dc) return Promise.resolve();
+    // just after a command: keep the pipe nearly empty so the command wins
+    const quiet = Date.now() - this.lastCommandAt < 300;
+    const ceiling = limit ?? (quiet ? 48 * 1024 : 128 * 1024);
+    if (dc.bufferedAmount < ceiling) return Promise.resolve();
     return new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        dc.removeEventListener('bufferedamountlow', finish);
+        window.clearInterval(t);
+        resolve();
+      };
+      dc.bufferedAmountLowThreshold = Math.floor(ceiling / 2);
+      dc.addEventListener('bufferedamountlow', finish);
+      // safety net: a closed channel fires nothing
       const t = window.setInterval(() => {
-        if (!conn.open || dc.bufferedAmount < limit) { window.clearInterval(t); resolve(); }
-      }, 40);
+        if (!conn.open || dc.bufferedAmount < ceiling) finish();
+      }, 50);
     });
   }
 
