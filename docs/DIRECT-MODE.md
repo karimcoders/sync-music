@@ -734,3 +734,29 @@ takes the file in a single request, so there is no "play from 5 % of the
 upload". What makes it feel instant in practice is that songs are uploaded and
 prefetched while an earlier one plays — by the time anybody presses the next
 song, the phones already know where to get it.
+
+## A host refresh does not stop the music
+
+Earlier, reloading the host page silently killed every speaker: `attach()` restored the
+playlist but always came back with `trackIndex: 0` and `transport.state: 'idle'`, and then
+pushed that idle transport to every phone. Reproduction showed both phones stuck at
+`t:0, paused:true` for 22 s.
+
+The host now remembers what it was playing. `rememberPlayback()` writes
+`{trackId, position, playing, at}` into the `sync-music.p2phost` localStorage record on every
+`pushTransport()` and on a 2 s timer while playing. On `attach()` the host restores the right
+`trackIndex`, and if it was playing it waits (up to 15 s, polling every 500 ms) for at least one
+speaker to reconnect and then resumes with `play(trackId, position + elapsed)` — so the phones
+are never told to stop in the first place.
+
+`node tools/hostrefresh-e2e.mjs <app-url>`:
+
+```
+✓ both phones playing at 2.44s before the host refreshes
+  host page reloaded
+  silent samples across both phones during 16 s: 0/32
+✓ the speakers kept playing right through the host refresh
+  after: phones [18.39,18.4], host {"spk":2,"state":"playing"}
+✓ the host came back still playing, and found its speakers again
+✓ still in sync after the refresh: 10 ms apart
+```

@@ -49,6 +49,8 @@ export class P2PHostClient {
   /** songs already parked in the cloud: trackId → public URL */
   private urls = new Map<string, string>();
   private cloud: CloudConfig | null = loadCloud();
+  /** set by attach() when a refresh interrupted a song that was playing */
+  private resumeAt: { trackId: string; position: number } | null = null;
   private timers: number[] = [];
   private seq = 0;           // ids for uploaded tracks
   /**
@@ -119,8 +121,38 @@ export class P2PHostClient {
   }
 
   private set(p: Partial<HostState>) { this.state = { ...this.state, ...p }; this.onChange(this.state); }
+
+  /** a note of the position every couple of seconds, so a crash loses little */
+  private rememberTimer = window.setInterval(() => {
+    if (this.transport.state === 'playing') this.rememberPlayback();
+  }, 2000);
+  /**
+   * Remember what was playing, so a refresh does not stop the party.
+   *
+   * Reloading the host page used to bring the room back with an empty
+   * transport — the host then told every speaker "idle" and all of them
+   * stopped dead at 0:00. The song, the position and the moment it was
+   * measured are now written down, and `attach()` picks the music back up
+   * where it actually is.
+   */
+  private rememberPlayback() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(STORE) || '{}');
+      localStorage.setItem(STORE, JSON.stringify({
+        ...raw,
+        play: {
+          trackId: this.transport.trackId,
+          position: this.livePosition(),
+          playing: this.transport.state === 'playing',
+          at: Date.now(),
+        },
+      }));
+    } catch { /* private mode: a refresh then simply starts paused */ }
+  }
+
   private pushTransport() {
     this.set({ transport: { ...this.transport } });
+    this.rememberPlayback();
     // the "what comes next" hint must follow every playlist/track change,
     // otherwise phones decode ahead for a song that is no longer next
     this.hintNext();
@@ -239,12 +271,45 @@ export class P2PHostClient {
           return track;
         });
         this.transport = { ...this.transport, playlist, trackIndex: 0, trackId: playlist[0].id };
+
+        // Pick the music back up exactly where the refresh interrupted it.
+        let saved: any = null;
+        try { saved = JSON.parse(localStorage.getItem(STORE) || '{}').play ?? null; } catch { /* none */ }
+        const idx = saved?.trackId ? playlist.findIndex((t) => t.id === saved.trackId) : -1;
+        if (idx >= 0) {
+          this.transport = { ...this.transport, trackIndex: idx, trackId: playlist[idx].id };
+          if (saved.playing) {
+            // it kept playing on the speakers while we were gone, so the
+            // position has moved on since it was written down
+            const pos = (saved.position ?? 0) + Math.max(0, (Date.now() - (saved.at ?? Date.now())) / 1000);
+            this.resumeAt = { trackId: playlist[idx].id, position: pos };
+          } else {
+            this.transport = { ...this.transport, state: 'paused', position: saved.position ?? 0 };
+          }
+        }
       }
       this.set({
         sessionId: roomId, conn: 'connected',
-        info: 'Room re-opened — speakers reconnect by themselves.',
+        info: this.resumeAt
+          ? 'Room re-opened — picking the song back up where it was.'
+          : 'Room re-opened — speakers reconnect by themselves.',
       });
       this.pushTransport();
+      if (this.resumeAt) {
+        // Give the speakers a moment to dial back in, then carry on from the
+        // live position. Waiting for them matters: a PLAY sent to an empty
+        // room would leave the phones paused at 0.
+        const want = this.resumeAt;
+        this.resumeAt = null;
+        const t0 = Date.now();
+        const tryResume = () => {
+          const back = this.conns.size > 0;
+          if (!back && Date.now() - t0 < 15000) { window.setTimeout(tryResume, 500); return; }
+          const moved = (Date.now() - t0) / 1000;
+          this.play(want.trackId, want.position + moved);
+        };
+        window.setTimeout(tryResume, 800);
+      }
     } catch (e: any) {
       localStorage.removeItem(STORE);
       this.set({ sessionId: null, conn: 'offline', error: e?.message || 'Could not re-open that room.' });
