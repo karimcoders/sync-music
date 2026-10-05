@@ -74,6 +74,8 @@ export class P2PSpeakerClient {
   private closed = false;
   private retry = 0;
   private lastInbound = 0;
+  /** a probe ping is outstanding on a quiet but still-open channel */
+  private probed = false;
   private reconnectPending = false;
 
   state: UiState = {
@@ -150,7 +152,16 @@ export class P2PSpeakerClient {
     this.note('net', navigator.onLine === false
       ? 'Internet: this phone reports it is OFFLINE'
       : 'Internet: online');
-    this.set({ conn: 'connecting', phase: 'CONNECTING', info: 'Looking for the host…', error: null });
+    // Do not shout over music that is playing perfectly well. A reconnect
+    // while this phone is mid-song is housekeeping, not an outage: the
+    // screenshot that started this said CONNECTING and "Looking for the
+    // host…" directly above a song playing at 1 ms of drift, which is
+    // alarming and untrue. Only a phone that is actually silent is
+    // "connecting".
+    const sounding = this.transportPlaying && !!this.audio && !this.audio.paused;
+    this.set(sounding
+      ? { conn: 'reconnecting', error: null, info: 'Playing from this phone — reconnecting quietly.' }
+      : { conn: 'connecting', phase: 'CONNECTING', info: 'Looking for the host…', error: null });
     // Register on EVERY broker at once. The host may have had to fall back to
     // a different one (the public one rate-limits and holds stale ids), and a
     // phone should not spend half a minute discovering that one by one.
@@ -329,7 +340,7 @@ export class P2PSpeakerClient {
         this.clearConnTimers();
         this.set({
           conn: 'reconnecting', hostOnline: false,
-          info: this.transportPlaying ? 'Offline — playing from this phone.' : null,
+          info: this.transportPlaying ? 'Playing from this phone — reconnecting quietly.' : null,
         });
         this.scheduleReconnect();
       };
@@ -363,17 +374,30 @@ export class P2PSpeakerClient {
     // silence longer than a few seconds means the channel is gone.
     this.connTimers.push(window.setInterval(() => {
       if (this.closed || this.reconnectPending) return;
-      if (Date.now() - this.lastInbound > 6000) {
-        this.set({
-          conn: 'reconnecting', hostOnline: false,
-          info: this.transportPlaying
-            ? 'Lost the host — still playing from this phone, will re-sync automatically.'
-            : 'Lost the host — reconnecting…',
-        });
-        try { this.conn?.close(); } catch {}
-        this.clearConnTimers();
-        this.scheduleReconnect();
+      const silent = Date.now() - this.lastInbound;
+      if (silent < 6000) { this.probed = false; return; }
+      // Six seconds of quiet does NOT mean the channel is dead. A host tab
+      // that the phone's browser has throttled, a moment of packet loss on
+      // mobile data, a screen that just went off — all of these produce a
+      // gap, and tearing down a WORKING channel for them is what put a phone
+      // in a permanent "Looking for the host…" loop while the song played on.
+      // So: knock first, and only give up if nothing comes back.
+      if (this.conn?.open && !this.probed) {
+        this.probed = true;
+        this.ping();
+        return;                       // one more cycle to answer
       }
+      if (this.conn?.open && silent < 14000) return;   // still open: keep waiting
+      this.probed = false;
+      this.set({
+        conn: 'reconnecting', hostOnline: false,
+        info: this.transportPlaying
+          ? 'Playing from this phone — reconnecting quietly.'
+          : 'Lost the host — reconnecting…',
+      });
+      try { this.conn?.close(); } catch {}
+      this.clearConnTimers();
+      this.scheduleReconnect();
     }, 2000));
     this.startReporting();
   }

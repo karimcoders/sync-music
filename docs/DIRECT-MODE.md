@@ -908,3 +908,40 @@ noise), so it sounds like a room but is not a recording of one; drive is
 deliberate distortion; and there is no noise gate, because a correct one needs
 sample-level logic in an AudioWorklet and a fake gate built from a compressor
 would not gate at all.
+
+## "CONNECTING" over a song that is playing fine
+
+A photo from a real phone: the song playing at 1 ms of drift, and directly
+above it a CONNECTING chip with "Looking for the host…" underneath.
+
+Both halves were wrong.
+
+* **The watchdog killed a working channel.** Six seconds without a PONG was
+  treated as "the host is gone", and the open data channel was closed and
+  discovery restarted. Six seconds of quiet is ordinary: a host tab the phone's
+  browser has throttled, a screen that just went off, a moment of loss on
+  mobile data. The loop then repeated for as long as the conditions lasted.
+  Now the client knocks first — it sends a probe ping and keeps an OPEN channel
+  for up to 14 s of silence before giving up. A channel that has really closed
+  still reconnects immediately, as before.
+* **The UI shouted over music that was fine.** `connect()` always set
+  `conn: 'connecting'` and "Looking for the host…". A reconnect while this
+  phone is mid-song is housekeeping, not an outage, so a phone that is making
+  sound now shows "Playing from this phone — reconnecting quietly."
+
+`node tools/steady-e2e.mjs <app-url>`:
+
+```
+✓ playing at 1.46s, state "connected"
+  during 12 s of simulated quiet: connecting 0/12, "Looking for the host" 0/12, silent 0/12
+✓ a playing phone never claimed it was looking for the host
+✓ the music never stopped
+✓ the channel survived the quiet patch — it was probed, not killed
+✓ a genuinely dead channel still reconnects
+✓ still playing at the end, at 18.02s
+```
+
+A note for whoever writes the next test here: assigning `lastInbound` into the
+past does NOT simulate silence. The host keeps talking and the next message
+resets it, so the watchdog never fires and the test passes against the broken
+build — it did. The reading has to be frozen with a property getter.
