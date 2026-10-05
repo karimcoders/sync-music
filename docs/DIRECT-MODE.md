@@ -778,3 +778,40 @@ nothing was connected to.
 
 The player now remembers the element in `pendingEl` and polls every 500 ms until
 `ctx.state === 'running'`, then attaches and clears the timer.
+
+## The mixer is the ROOM's desk, not one phone's
+
+The real reason "the mixer does nothing": there was no `MIX` message in the
+protocol at all. `Mixer.tsx` called `speaker.setMix()`, which changes the strip
+of the phone you are holding and nothing else. The person at the host moved
+bass, heard their own phone change (or nothing, if the host was not an output),
+and every speaker in the room carried on exactly as before.
+
+Now the host owns the desk:
+
+* `P2PHostClient.setRoomMix(channel, settings)` stores the room strip in
+  `sync-music.roommix`, so a host refresh does not lose the sound of the night,
+  and broadcasts `{ type: 'MIX', channel, settings }` reliably.
+* Every speaker applies it through the same `setMix()` it already had, which
+  also persists it — a phone that reloads keeps the room's sound.
+* A speaker joining mid-song is sent the current strips right after `VOLUME`,
+  so a late arrival does not sound different from the rest.
+* The Mixer page shows an "All speakers / This phone" switch (`mix-scope`) when
+  the device is also the host, defaulting to the whole room.
+
+`node tools/mixer-real-e2e.mjs <app-url>` is the test that would have caught
+the original bug, because unlike `mixer-yt-e2e` it does not inject a tone into
+the strip — it plays a real song from a real host and measures the level at the
+strip's output:
+
+```
+✓ the phone is playing the song
+  level at the strip's output while the song plays: -4.1 dBFS (context running)
+✓ the song really is routed THROUGH the mixer
+  level with the channel gain at 0: -120.0 dBFS
+✓ the mixer commands the sound (115.9 dB of control)
+  speaker level: -4.1 dBFS -> -120.0 dBFS after the HOST pulled the room gain down
+✓ the host's mixer really controls the speakers (115.9 dB)
+✓ and brings it back up again
+✓ a phone joining later inherits the room sound
+```

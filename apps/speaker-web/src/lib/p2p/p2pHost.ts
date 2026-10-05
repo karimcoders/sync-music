@@ -41,6 +41,7 @@ interface Job { trackId: string; force: boolean; waiters: Array<() => void> }
 interface Outbox { urgent: Job[]; normal: Job[]; running: boolean; current: Job | null }
 
 const STORE = 'sync-music.p2phost';
+const MIX_STORE = 'sync-music.roommix';
 
 export class P2PHostClient {
   private peer: Peer | null = null;
@@ -1272,6 +1273,34 @@ export class P2PHostClient {
       atHostTime: at, playing: this.transport.state === 'playing',
     });
     this.send(c.conn, { type: 'VOLUME', seq: this.cmdSeq, volume: this.transport.volume });
+    // a speaker that joins mid-song must sound like the rest of the room
+    for (const ch of ['music', 'voice'] as const) {
+      const st = this.roomMix[ch];
+      if (st && Object.keys(st).length)
+        this.send(c.conn, { type: 'MIX', seq: ++this.cmdSeq, channel: ch, settings: st });
+    }
+  }
+
+  /** the room-wide mixer, mastered by the host */
+  private roomMix: Record<string, Record<string, number | boolean>> = (() => {
+    try { return JSON.parse(localStorage.getItem(MIX_STORE) || '{}'); } catch { return {}; }
+  })();
+
+  /**
+   * Set a channel strip for the WHOLE room. The host keeps the master copy in
+   * localStorage so a refresh does not lose the sound of the night, applies it
+   * to its own output, and pushes it to every speaker (and to each new one as
+   * it joins, below).
+   */
+  setRoomMix(channel: 'music' | 'voice', settings: Record<string, number | boolean>) {
+    const cur = this.roomMix[channel] || {};
+    this.roomMix = { ...this.roomMix, [channel]: { ...cur, ...settings } };
+    try { localStorage.setItem(MIX_STORE, JSON.stringify(this.roomMix)); } catch {}
+    this.broadcastReliable({ type: 'MIX', seq: ++this.cmdSeq, channel, settings });
+  }
+
+  roomMixOf(channel: 'music' | 'voice'): Record<string, number | boolean> {
+    return this.roomMix[channel] || {};
   }
 
   autoNext(enabled: boolean) { this.transport = { ...this.transport, autoNext: enabled }; this.pushTransport(); }

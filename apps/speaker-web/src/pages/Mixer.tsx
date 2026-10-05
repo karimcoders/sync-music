@@ -15,6 +15,16 @@ type Chan = 'music' | 'voice';
  */
 export default function Mixer({ go }: { go: (p: string) => void }) {
   const client = getSpeaker();
+  // If this device is also running the host, the desk is the ROOM's desk: the
+  // sound engineer expects a move here to be heard on every speaker, not only
+  // in their own hand. Without this the mixer was local-only, which is what
+  // "the mixer does nothing" really meant.
+  const host = (window as any).__syncHost;
+  const isDesk = !!host && typeof host.setRoomMix === 'function';
+  const toRoom = (patch: Partial<MixerSettings>) => {
+    if (isDesk && roomWide) host.setRoomMix(chan, patch as Record<string, number | boolean>);
+  };
+  const [roomWide, setRoomWide] = useState(true);
   const [chan, setChan] = useState<Chan>('music');
   const [vals, setVals] = useState<MixerSettings>(() => client?.mixOf('music') ?? { ...FLAT });
   const [reduction, setReduction] = useState(0);
@@ -36,13 +46,32 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
     const next = { ...vals, ...patch };
     setVals(next);
     client?.setMix(chan, patch);
+    toRoom(patch);
   };
 
   const live = !!client?.isAudioEnabled;
 
   return (
     <Shell tab="mixer" go={go}>
-      <AppBar title="Mixer" sub="This phone" />
+      <AppBar title="Mixer" sub={isDesk && roomWide ? 'Every speaker' : 'This phone'} />
+      {isDesk && (
+        <Card>
+          <Row>
+            <div>
+              <div className="kicker">Where these controls apply</div>
+              <div className="muted" style={{ marginTop: 4 }}>
+                {roomWide
+                  ? 'Every connected speaker, and this phone.'
+                  : 'Only this phone. The speakers keep their own sound.'}
+              </div>
+            </div>
+            <button className="chip" data-testid="mix-scope"
+                    onClick={() => setRoomWide(!roomWide)}>
+              {roomWide ? 'All speakers' : 'This phone'}
+            </button>
+          </Row>
+        </Card>
+      )}
 
       <Card>
         <Row>
@@ -107,11 +136,11 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
         <div className="chip-row" style={{ marginTop: 10 }}>
           {Object.keys(PRESETS).map((name) => (
             <button key={name} className="chip" data-testid={`preset-${name}`}
-                    onClick={() => { const p = PRESETS[name]; setVals({ ...vals, ...p }); client?.setMix(chan, p); }}>
+                    onClick={() => { const p = PRESETS[name]; setVals({ ...vals, ...p }); client?.setMix(chan, p); toRoom(p); }}>
               {name}
             </button>
           ))}
-          <button className="chip" onClick={() => { setVals({ ...FLAT }); client?.setMix(chan, FLAT); }}>Reset</button>
+          <button className="chip" onClick={() => { setVals({ ...FLAT }); client?.setMix(chan, FLAT); toRoom(FLAT); }}>Reset</button>
         </div>
       </Card>
 

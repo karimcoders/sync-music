@@ -855,6 +855,13 @@ export class P2PSpeakerClient {
         this.applyVolume();
         break;
 
+      case 'MIX':
+        // The host is the sound engineer: its strip settings win on every
+        // phone. setMix also persists them, so a phone that reloads keeps
+        // the room's sound instead of snapping back to flat.
+        this.setMix(m.channel, m.settings as Partial<MixerSettings>);
+        break;
+
       case 'YT':
         this.appliedSeq = Math.max(this.appliedSeq, m.seq);
         void this.applyYouTube(m.videoId, m.position, m.atHostTime, m.playing);

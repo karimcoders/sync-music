@@ -55,6 +55,11 @@ export type P2PMessage =
   | { type: 'YT'; seq: number; videoId: string | null; position: number; atHostTime: number; playing: boolean }
   | { type: 'RESYNC'; seq: number; trackId: string; position: number; atHostTime: number; playing: boolean }
   | { type: 'VOLUME'; seq: number; volume: number }
+  // The host's channel strip, pushed to every speaker. Without this the
+  // mixer was purely local: the person at the host moved bass and nothing
+  // anywhere else changed, which is exactly what "the mixer does nothing"
+  // meant. `settings` is a partial MixerSettings.
+  | { type: 'MIX'; seq: number; channel: 'music' | 'voice'; settings: Record<string, number | boolean> }
   | { type: 'RENAME'; name: string }
   /**
    * "This is the song that comes next." Not a command (no seq, no timing): it
