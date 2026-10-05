@@ -369,6 +369,27 @@ export class P2PSpeakerClient {
     for (let i = 0; i < 10; i++) this.connTimers.push(window.setTimeout(() => this.ping(), i * 150));
     this.connTimers.push(window.setInterval(() => this.ping(), 1000));
     this.lastInbound = Date.now();
+    // The transport can also tell us the moment it really dies, which is far
+    // faster and far more reliable than counting quiet seconds.
+    const pc: RTCPeerConnection | undefined = (conn as any).peerConnection;
+    if (pc) {
+      const onState = () => {
+        if (this.conn !== conn || this.closed) return;
+        const st = pc.connectionState ?? pc.iceConnectionState;
+        this.note('link', `Link: ${st}`);
+        if (st === 'failed' || st === 'closed') {
+          this.set({
+            conn: 'reconnecting', hostOnline: false,
+            info: this.transportPlaying ? 'Playing from this phone — reconnecting quietly.' : 'Lost the host — reconnecting…',
+          });
+          try { conn.close(); } catch {}
+          this.clearConnTimers();
+          this.scheduleReconnect(300);
+        }
+      };
+      pc.addEventListener('connectionstatechange', onState);
+      pc.addEventListener('iceconnectionstatechange', onState);
+    }
     // PeerJS does not always fire 'close' when the host tab goes away (a
     // refresh, a crash, a dead Wi-Fi link). The host answers every PING, so
     // silence longer than a few seconds means the channel is gone.
@@ -386,6 +407,17 @@ export class P2PSpeakerClient {
         this.probed = true;
         this.ping();
         return;                       // one more cycle to answer
+      }
+      // App-level silence is a GUESS. The transport layer knows the truth:
+      // if the RTCPeerConnection is still 'connected', the link is physically
+      // up and the quiet is the other phone being throttled (screen off,
+      // background tab) — not a dead channel. Tearing that down was worse
+      // than useless: the host tab is throttled too, so the fresh dial finds
+      // nothing and the phone sits on RECONNECTING forever while the song
+      // plays on. Never kill a link the transport says is alive.
+      if (this.conn?.open && this.iceAlive()) {
+        if (silent > 14000) this.note('link', 'Link: open but quiet — the host phone is asleep or throttled');
+        return;
       }
       if (this.conn?.open && silent < 14000) return;   // still open: keep waiting
       this.probed = false;
@@ -858,6 +890,18 @@ export class P2PSpeakerClient {
     this.timers.push(this.chaseTimer);
   }
 
+
+  /**
+   * True while the browser's own WebRTC stack still considers the link up.
+   * Unknown (older WebViews that do not expose it) counts as alive: guessing
+   * "dead" is what caused the permanent reconnect loop.
+   */
+  private iceAlive(): boolean {
+    const pc: RTCPeerConnection | undefined = (this.conn as any)?.peerConnection;
+    const st = pc?.connectionState ?? pc?.iceConnectionState;
+    if (!st) return true;
+    return st === 'connected' || st === 'completed' || st === 'new' || st === 'checking';
+  }
 
   private send(m: P2PMessage) { try { if (this.conn?.open) this.conn.send(m); } catch {} }
   private ping() { this.send({ type: 'PING', t1: Date.now() }); }

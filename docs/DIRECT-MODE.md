@@ -997,3 +997,34 @@ Honest limits, which no amount of DSP changes:
   about 20 ms, and expect a thinner sound on a single speaker.
 - Turning everything back to zero returns a measurably steady signal
   (0.0 dB swing), so the effects leave nothing behind.
+
+## RECONNECTING over a song that is playing in sync
+
+The next photo from the same phone: chip **RECONNECTING**, and directly below
+it `SYNCHRONIZED · 3 ms · drift 36 ms`, the song at 01:14 of 03:16, and the
+diagnostics stuck on `Host: looking on 4 room slots…`.
+
+That was a regression from the previous fix. The 14-second silence watchdog
+still tore the channel down in the end — and when the quiet is caused by the
+*host* phone being throttled (screen off, backgrounded tab), the host cannot
+answer the fresh dial either. So the phone threw away a working link and then
+hunted for a host that could not reply, forever, while the song played on.
+
+Counting quiet seconds was always a guess. The browser's own WebRTC stack
+knows the answer, so now:
+
+- if the `RTCPeerConnection` still reports `connected`/`completed`, the link is
+  **never** torn down, however long the quiet lasts. The diagnostics say
+  `Link: open but quiet — the host phone is asleep or throttled`;
+- the connection state is also *watched*, so a `failed`/`closed` link starts
+  reconnecting at once instead of after 14 s of counting;
+- a browser too old to expose the state counts as alive — guessing "dead" is
+  what caused the loop.
+
+The chip was lying too. It answered "is the control channel quiet?" when the
+question is "is this phone doing its job?". A phone that is making the right
+sound now reads **PLAYING** (green), and RECONNECTING is reserved for a phone
+that is actually silent.
+
+`tools/steady-e2e.mjs` now freezes the inbound clock for 20 s and fails if the
+phone leaves `connected`. On the previous build: `reconnecting 7/20`. Now: 0/20.

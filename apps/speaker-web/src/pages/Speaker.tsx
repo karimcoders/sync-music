@@ -129,9 +129,15 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
 
   if (!s) return null;
 
-  const tone = s.conn === 'connected' ? 'ok' : s.conn === 'disconnected' ? 'idle' : 'warn';
+  // What the chip must answer is "is my phone doing its job right now?", not
+  // "is the control channel momentarily quiet?". A phone that is playing the
+  // right song in sync is working, even while it re-opens its link in the
+  // background, and shouting RECONNECTING over that is just alarming.
+  const sounding = s.phase === 'PLAYING' || (s.playing === true && s.conn !== 'disconnected');
+  const tone = s.conn === 'connected' || sounding ? 'ok' : s.conn === 'disconnected' ? 'idle' : 'warn';
   const label =
     s.conn === 'connected' ? (s.phase === 'SYNCING' ? 'SYNCHRONIZING' : 'CONNECTED')
+    : sounding ? 'PLAYING'
     : s.conn === 'reconnecting' ? 'RECONNECTING' : s.conn === 'connecting' ? 'CONNECTING' : 'OFFLINE';
 
   /* -------------------------- looking for a host ------------------------ */

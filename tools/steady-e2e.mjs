@@ -71,20 +71,27 @@ else ok(`playing at ${start.t}s, state "${start.conn}"`);
 // why this scenario never showed up in the lab while real phones hit it daily.
 await sp.evaluate(() => {
   const c = window.__syncClient;
-  c.__frozenInbound = Date.now() - 9000;
+  c.__frozenInbound = Date.now() - 25000;
   Object.defineProperty(c, 'lastInbound', {
     get() { return c.__frozenInbound; }, set() {}, configurable: true,
   });
 });
-let flapped = 0; let sawLooking = 0; let silentSamples = 0;
-for (let i = 0; i < 12; i++) {
+let flapped = 0; let sawLooking = 0; let silentSamples = 0; let tornDown = 0;
+for (let i = 0; i < 20; i++) {
   const r = await probe();
   if (r.conn === 'connecting') flapped++;
+  if (r.conn === 'reconnecting') tornDown++;
   if (/looking for the host/i.test(r.info || '')) sawLooking++;
   if (!r.playing) silentSamples++;
   await sp.waitForTimeout(1000);
 }
-console.log(`  during 12 s of simulated quiet: connecting ${flapped}/12, "Looking for the host" ${sawLooking}/12, silent ${silentSamples}/12`);
+console.log(`  during 20 s of simulated quiet: connecting ${flapped}/20, reconnecting ${tornDown}/20, "Looking for the host" ${sawLooking}/20, silent ${silentSamples}/20`);
+// The link is PHYSICALLY fine here — only the app-level traffic went quiet,
+// exactly like a host phone whose screen went off. Tearing it down sent the
+// phone hunting for room slots that a throttled host cannot answer, and it
+// sat on RECONNECTING with the song still playing. It must simply wait.
+if (tornDown === 0) ok('a quiet but physically-alive link is left alone, not torn down');
+else fail(`the phone tore down a live link and went hunting (${tornDown}/20 samples on "reconnecting")`);
 if (flapped === 0 && sawLooking === 0) ok('a playing phone never claimed it was looking for the host');
 else fail(`the phone said it was connecting (${flapped}) / looking for the host (${sawLooking}) while the music played`);
 if (silentSamples === 0) ok('the music never stopped');
