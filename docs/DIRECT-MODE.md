@@ -945,3 +945,55 @@ A note for whoever writes the next test here: assigning `lastInbound` into the
 past does NOT simulate silence. The host keeps talking and the next message
 resets it, so the watchdog never fires and the test passes against the broken
 build — it did. The reading has to be frozen with a property getter.
+
+## A transfer that goes nowhere, and a phone stuck on an old build
+
+Two faults showed up together on a real phone: the time stuck at `00:00`, the
+chip reading SYNCING, and the message cycling `Re-requesting 131 → 150 missing
+piece(s) of the track…` while the version banner said the phone was built at
+`06:03` and the host at `06:14`.
+
+They were one story. The phone was running an older cached build, its chunk
+requests were not being answered, and the chase had no way to stop. Asking the
+same dead channel faster forever is not recovery.
+
+**The chase now gives up.** `startChunkChase()` tracks how many pieces have
+actually landed. If four consecutive rounds bring in nothing new, it stops,
+throws away the half-finished transfer and gets the song a different way:
+straight from cloud storage if the track is there, otherwise by asking the host
+to start the send again from scratch. A brief hiccup still gets its retries —
+only a genuinely stalled transfer is abandoned.
+
+**A stale phone now updates itself.** The version card used to just state the
+mismatch. It now unregisters the service worker, drops the cached app shell
+(never the downloaded songs) and reloads, 1.5 s after the mismatch is seen, with
+an `UPDATE NOW` button for anyone who does not want to wait. If the *host* is
+the older one, the phone cannot fix that and says so: reload the host page.
+
+Proved by `tools/stalled-e2e.mjs`, which fails on the previous build (4 checks).
+
+## 3D, 8D and the modulation effects
+
+The desk has a **3D / FX** section. None of it is a preset name over a stereo
+trick — every control was measured by `tools/fx3d-e2e.mjs` on the real strip:
+
+| effect | what it really is | measured |
+|---|---|---|
+| 8D | a real HRTF `PannerNode` walked around your head on the audio clock | 21.4 dB of left-right movement (0.0 dB with it off) |
+| 8D height | the same panner lifted above/below the circle | 5.9 dB of HRTF colouring |
+| 3D width (Haas) | 0–40 ms of delay on one side only | a 1 ms setting notches 500 Hz exactly where the theory says |
+| Chorus | a short LFO-modulated delay, mixed back | 4.8 dB of swing |
+| Flanger | a very short modulated delay with feedback | 13.6 dB |
+| Phaser | four all-pass stages swept by an LFO | 8.1 dB |
+| Tremolo | the output level itself, modulated | 29.3 dB |
+
+Honest limits, which no amount of DSP changes:
+
+- **8D needs headphones.** HRTF works by feeding each ear a different signal.
+  Over a phone's single built-in speaker the most it can do is sweep the sound
+  left to right, and on a mono speaker you mostly hear a slow tonal shift.
+- **Haas costs you mono.** Delaying one side means the two sides partly cancel
+  when they are summed — that is the notch the test measures. Keep it under
+  about 20 ms, and expect a thinner sound on a single speaker.
+- Turning everything back to zero returns a measurably steady signal
+  (0.0 dB swing), so the effects leave nothing behind.

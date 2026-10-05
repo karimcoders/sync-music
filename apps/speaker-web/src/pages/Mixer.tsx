@@ -27,7 +27,7 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
   };
   const [, repaint] = useState(0);
   const [chan, setChan] = useState<Chan>('music');
-  const [sect, setSect] = useState<'eq' | 'dyn' | 'space' | 'out'>('eq');
+  const [sect, setSect] = useState<'eq' | 'dyn' | 'space' | 'fx' | 'out'>('eq');
   const [vals, setVals] = useState<MixerSettings>(() => client?.mixOf('music') ?? { ...FLAT });
   const [reduction, setReduction] = useState(0);
 
@@ -116,9 +116,9 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
 
       <Card>
         <div className="seg" style={{ marginBottom: 12 }}>
-          {(['eq', 'dyn', 'space', 'out'] as const).map((k) => (
+          {(['eq', 'dyn', 'space', 'fx', 'out'] as const).map((k) => (
             <button key={k} className={sect === k ? 'on' : ''} data-testid={`sect-${k}`} onClick={() => setSect(k)}>
-              {k === 'eq' ? 'EQ' : k === 'dyn' ? 'DYNAMICS' : k === 'space' ? 'SPACE' : 'OUT'}
+              {k === 'eq' ? 'EQ' : k === 'dyn' ? 'DYNAMICS' : k === 'space' ? 'SPACE' : k === 'fx' ? '3D / FX' : 'OUT'}
             </button>
           ))}
         </div>
@@ -220,6 +220,55 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
             <p className="tiny" style={{ margin: '6px 0 0' }}>
               The reverb is a convolution of a synthetic room, not a recording of a real hall.
             </p>
+          </Stack>
+        )}
+
+        {sect === 'fx' && (
+          <Stack gap={4}>
+            <div className="kicker">8D — the sound circles your head</div>
+            <Knob label="8D amount" unit="%" min={0} max={100} step={1} value={Math.round(vals.rotate * 100)}
+                  onChange={(v) => set({ rotate: v / 100 })} testId="rotate" />
+            <Knob label="One circle every" unit="s" min={2} max={30} step={0.5} value={vals.rotateRate}
+                  onChange={(v) => set({ rotateRate: v })} testId="rotate-rate" />
+            <Knob label="Height" unit="" min={-100} max={100} step={5} value={Math.round(vals.rotateHeight * 100)}
+                  onChange={(v) => set({ rotateHeight: v / 100 })} testId="rotate-height" />
+            <p className="tiny" style={{ margin: '6px 0 0' }}>
+              This is a real HRTF 3D panner being moved around you, not a stereo trick.
+              On <b>headphones</b> you hear it circling. On a phone's own single speaker
+              the most it can do is sweep left to right — that is a hardware limit, not a bug.
+            </p>
+
+            <div className="kicker" style={{ marginTop: 12 }}>3D width (Haas)</div>
+            <Knob label="Delay one side by" unit="ms" min={0} max={40} step={1} value={Math.round(vals.haas)}
+                  onChange={(v) => set({ haas: v })} testId="haas" />
+            <p className="tiny" style={{ margin: '6px 0 0' }}>
+              Up to about 20 ms reads as width. Past 30 ms you start hearing it as a slap.
+              It also makes the track slightly weaker in mono.
+            </p>
+
+            <div className="kicker" style={{ marginTop: 12 }}>Chorus</div>
+            <Knob label="Depth" unit="%" min={0} max={100} step={1} value={Math.round(vals.chorus * 100)}
+                  onChange={(v) => set({ chorus: v / 100 })} testId="chorus" />
+            <Knob label="Rate" unit="Hz" min={0.05} max={6} step={0.05} value={vals.chorusRate}
+                  onChange={(v) => set({ chorusRate: v })} testId="chorus-rate" />
+
+            <div className="kicker" style={{ marginTop: 12 }}>Flanger</div>
+            <Knob label="Depth" unit="%" min={0} max={100} step={1} value={Math.round(vals.flanger * 100)}
+                  onChange={(v) => set({ flanger: v / 100 })} testId="flanger" />
+            <Knob label="Feedback" unit="%" min={0} max={90} step={1} value={Math.round(vals.flangerFeedback * 100)}
+                  onChange={(v) => set({ flangerFeedback: v / 100 })} testId="flanger-fb" />
+
+            <div className="kicker" style={{ marginTop: 12 }}>Phaser</div>
+            <Knob label="Depth" unit="%" min={0} max={100} step={1} value={Math.round(vals.phaser * 100)}
+                  onChange={(v) => set({ phaser: v / 100 })} testId="phaser" />
+            <Knob label="Rate" unit="Hz" min={0.05} max={6} step={0.05} value={vals.phaserRate}
+                  onChange={(v) => set({ phaserRate: v })} testId="phaser-rate" />
+
+            <div className="kicker" style={{ marginTop: 12 }}>Tremolo</div>
+            <Knob label="Depth" unit="%" min={0} max={100} step={1} value={Math.round(vals.tremolo * 100)}
+                  onChange={(v) => set({ tremolo: v / 100 })} testId="tremolo" />
+            <Knob label="Rate" unit="Hz" min={0.1} max={16} step={0.1} value={vals.tremoloRate}
+                  onChange={(v) => set({ tremoloRate: v })} testId="tremolo-rate" />
           </Stack>
         )}
 

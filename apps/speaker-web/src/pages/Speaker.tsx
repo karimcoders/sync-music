@@ -65,6 +65,19 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
     return () => { stopped = true; window.clearInterval(iv); release(); };
   }, [room, mode]);
 
+  // An out-of-date phone is the cause of a whole family of "it is behaving
+  // strangely" reports: it speaks a slightly different protocol to the host,
+  // and the person holding it has no reason to suspect a cached build. So
+  // update it instead of asking. Once per load, and only ever forwards.
+  const updating = useRef(false);
+  useEffect(() => {
+    const hb = s?.hostBuild;
+    if (!hb || hb <= __BUILD__ || updating.current) return;
+    updating.current = true;
+    const t = window.setTimeout(() => { void refreshApp(); }, 1500);
+    return () => window.clearTimeout(t);
+  }, [s?.hostBuild]);
+
   const c = ref.current;
   // NB: all hooks must run before any early return below.
   const pct = useMemo(() => (s && s.duration ? Math.min(100, (s.position / s.duration) * 100) : 0), [s]);
@@ -298,12 +311,12 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
         <Card>
           <Stack gap={8}>
             <div className="warn-text" data-testid="version-mismatch">
-              The host runs a different version of the app ({s.hostBuild}) than this phone ({__BUILD__}).
-              Different versions can behave differently from each other.
+              {s.hostBuild > __BUILD__
+                ? `This phone is on an older version (${__BUILD__}) than the host (${s.hostBuild}) — updating it now.`
+                : `The host runs an OLDER version (${s.hostBuild}) than this phone (${__BUILD__}). Reload the host page.`}
             </div>
             {s.hostBuild > __BUILD__
-              ? <Button variant="ghost" onClick={() => void refreshApp()}>UPDATE THIS PHONE</Button>
-              : <div className="tiny">The host is on the OLDER one — reload the host page.</div>}
+              && <Button variant="ghost" onClick={() => void refreshApp()}>UPDATE NOW</Button>}
           </Stack>
         </Card>
       )}

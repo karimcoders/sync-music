@@ -94,6 +94,32 @@ export interface MixerSettings {
   /* ---- stereo & output ---- */
   /** 0 = mono, 1 = as recorded, 2 = wide */
   width: number;
+
+  /* ---- movement and space (the "8D / 3D" family) ---- */
+  /** 8D: how far the sound swings around your head, 0…1 (0 = off) */
+  rotate: number;
+  /** 8D: one full circle every this many seconds (2…30) */
+  rotateRate: number;
+  /** 3D: HRTF elevation of the circle, −1 (below) … +1 (above) */
+  rotateHeight: number;
+  /** Haas widener: 0…40 ms of delay on one side (0 = off) */
+  haas: number;
+  /** chorus depth, 0…1 */
+  chorus: number;
+  /** chorus rate in Hz (0.05…6) */
+  chorusRate: number;
+  /** flanger depth, 0…1 */
+  flanger: number;
+  /** flanger feedback, 0…0.9 */
+  flangerFeedback: number;
+  /** phaser depth, 0…1 */
+  phaser: number;
+  /** phaser rate in Hz (0.05…6) */
+  phaserRate: number;
+  /** tremolo depth, 0…1 */
+  tremolo: number;
+  /** tremolo rate in Hz (0.1…16) */
+  tremoloRate: number;
   /** −1 = left, 0 = centre, +1 = right */
   pan: number;
   /** output level, 0…2 (1 = unity, 2 = +6 dB) */
@@ -117,6 +143,9 @@ export const FLAT: MixerSettings = {
   echo: 0, echoTime: 0.25, echoFeedback: 0.3,
   reverb: 0, reverbSize: 1.8, reverbDamp: 0.5,
   width: 1, pan: 0,
+  rotate: 0, rotateRate: 8, rotateHeight: 0, haas: 0,
+  chorus: 0, chorusRate: 0.8, flanger: 0, flangerFeedback: 0.3,
+  phaser: 0, phaserRate: 0.5, tremolo: 0, tremoloRate: 5,
   gain: 1, limiter: true, ceiling: -1,
 };
 
@@ -131,6 +160,13 @@ export const PRESETS: Record<string, Partial<MixerSettings>> = {
   Slapback: { echo: 0.25, echoTime: 0.12, echoFeedback: 0.15 },
   Warm: { drive: 25, driveMix: 0.6, treble: -1, b5g: -2, bass: 3 },
   'Phone speaker': { hpf: 170, bass: -4, mid: 3, b4g: 5, treble: 4, compOn: true, compThreshold: -20, compRatio: 5, makeup: 6, limiter: true },
+  '8D': { rotate: 1, rotateRate: 8, rotateHeight: 0, reverb: 0.25, reverbSize: 2.4, width: 1.2 },
+  '8D fast': { rotate: 1, rotateRate: 4, reverb: 0.2, width: 1.2 },
+  '3D wide': { haas: 18, width: 1.6, reverb: 0.15 },
+  Chorus: { chorus: 0.6, chorusRate: 0.8, width: 1.2 },
+  Flanger: { flanger: 0.7, flangerFeedback: 0.5 },
+  Phaser: { phaser: 0.7, phaserRate: 0.4 },
+  Tremolo: { tremolo: 0.6, tremoloRate: 5 },
   Loud: { compOn: true, compThreshold: -22, compRatio: 6, compAttack: 0.005, compRelease: 0.15, makeup: 8, gain: 1.2, ceiling: -0.5 },
 };
 
@@ -177,6 +213,47 @@ export class MixerChannel {
   private sideRneg: GainNode;
   private widthOut: GainNode;
   private panner: StereoPannerNode;
+
+  /* ---- movement: 8D rotation, Haas widener and the modulation effects ---- */
+  /** dry path around the 3D panner, and the 3D path itself */
+  private spinDry: GainNode;
+  private spinWet: GainNode;
+  private spin: PannerNode;
+  private spinSum: GainNode;
+  private spinPhase = 0;
+  private spinTimer = 0;
+
+  private haasL: DelayNode;
+  private haasR: GainNode;
+  private haasSplit: ChannelSplitterNode;
+  private haasMerge: ChannelMergerNode;
+  private haasBypass: GainNode;
+  private haasOn: GainNode;
+  private haasSum: GainNode;
+
+  private modIn: GainNode;
+  private chorusDelay: DelayNode;
+  private chorusLfo: OscillatorNode;
+  private chorusDepth: GainNode;
+  private chorusWet: GainNode;
+
+  private flangeDelay: DelayNode;
+  private flangeLfo: OscillatorNode;
+  private flangeDepth: GainNode;
+  private flangeFb: GainNode;
+  private flangeWet: GainNode;
+
+  private phaserStages: BiquadFilterNode[];
+  private phaserLfo: OscillatorNode;
+  private phaserDepth: GainNode;
+  private phaserWet: GainNode;
+
+  private tremGain: GainNode;
+  private tremLfo: OscillatorNode;
+  private tremDepth: GainNode;
+
+  private modDry: GainNode;
+  private modSum: GainNode;
 
   private brick: DynamicsCompressorNode;
   private limited: GainNode;
@@ -246,6 +323,67 @@ export class MixerChannel {
     this.widthOut = g();
     this.panner = ctx.createStereoPanner();
 
+    /* ---------------- movement: 8D, Haas, chorus/flanger/phaser/tremolo --- */
+    // 8D is not a trick: it is a real HRTF PannerNode whose position is moved
+    // around the listener's head. Over headphones that is genuinely the sound
+    // circling you; over a phone's own speaker you hear it as a slow sweep
+    // between left and right, which is all a single speaker can do.
+    this.spin = ctx.createPanner();
+    this.spin.panningModel = 'HRTF';
+    this.spin.distanceModel = 'inverse';
+    this.spin.refDistance = 1;
+    this.spin.positionX.value = 0;
+    this.spin.positionY.value = 0;
+    this.spin.positionZ.value = 1;
+    this.spinDry = g(1);
+    this.spinWet = g(0);
+    this.spinSum = g();
+
+    // Haas: a few milliseconds of delay on ONE side. The ear reads the
+    // difference as width, not as an echo, as long as it stays under ~40 ms.
+    this.haasSplit = ctx.createChannelSplitter(2);
+    this.haasMerge = ctx.createChannelMerger(2);
+    this.haasL = ctx.createDelay(0.05);
+    this.haasL.delayTime.value = 0;
+    this.haasR = g(1);
+    this.haasBypass = g(1);
+    this.haasOn = g(0);
+    this.haasSum = g();
+
+    this.modIn = g(1);
+    // chorus: a short, slowly modulated delay mixed back in
+    this.chorusDelay = ctx.createDelay(0.1);
+    this.chorusDelay.delayTime.value = 0.025;
+    this.chorusLfo = ctx.createOscillator();
+    this.chorusLfo.frequency.value = FLAT.chorusRate;
+    this.chorusDepth = g(0);
+    this.chorusWet = g(0);
+
+    // flanger: a very short modulated delay WITH feedback — the jet sweep
+    this.flangeDelay = ctx.createDelay(0.02);
+    this.flangeDelay.delayTime.value = 0.005;
+    this.flangeLfo = ctx.createOscillator();
+    this.flangeLfo.frequency.value = 0.25;
+    this.flangeDepth = g(0);
+    this.flangeFb = g(0);
+    this.flangeWet = g(0);
+
+    // phaser: four all-pass stages swept by an LFO
+    this.phaserStages = [400, 800, 1600, 3200].map((f) => bq('allpass', f, 1));
+    this.phaserLfo = ctx.createOscillator();
+    this.phaserLfo.frequency.value = FLAT.phaserRate;
+    this.phaserDepth = g(0);
+    this.phaserWet = g(0);
+
+    // tremolo: the level itself, modulated
+    this.tremGain = g(1);
+    this.tremLfo = ctx.createOscillator();
+    this.tremLfo.frequency.value = FLAT.tremoloRate;
+    this.tremDepth = g(0);
+
+    this.modDry = g(1);
+    this.modSum = g();
+
     this.brick = ctx.createDynamicsCompressor();
     this.brick.threshold.value = FLAT.ceiling;
     this.brick.knee.value = 0;
@@ -298,8 +436,40 @@ export class MixerChannel {
     this.sideRpos.connect(this.merger, 0, 1);
     this.merger.connect(this.widthOut).connect(this.panner);
 
-    this.panner.connect(this.brick).connect(this.limited).connect(this.out);
-    this.panner.connect(this.direct).connect(this.out);
+    // modulation block
+    this.panner.connect(this.modIn);
+    this.modIn.connect(this.modDry).connect(this.modSum);
+    this.modIn.connect(this.chorusDelay).connect(this.chorusWet).connect(this.modSum);
+    this.chorusLfo.connect(this.chorusDepth).connect(this.chorusDelay.delayTime);
+    this.modIn.connect(this.flangeDelay).connect(this.flangeWet).connect(this.modSum);
+    this.flangeDelay.connect(this.flangeFb).connect(this.flangeDelay);
+    this.flangeLfo.connect(this.flangeDepth).connect(this.flangeDelay.delayTime);
+    let ph: AudioNode = this.modIn;
+    this.phaserStages.forEach((st) => { ph.connect(st); ph = st; });
+    ph.connect(this.phaserWet).connect(this.modSum);
+    this.phaserStages.forEach((st) => this.phaserLfo.connect(this.phaserDepth).connect(st.frequency));
+    this.chorusLfo.start(); this.flangeLfo.start(); this.phaserLfo.start();
+
+    // tremolo rides the whole modulated signal
+    this.modSum.connect(this.tremGain);
+    this.tremLfo.connect(this.tremDepth).connect(this.tremGain.gain);
+    this.tremLfo.start();
+
+    // Haas widener
+    this.tremGain.connect(this.haasBypass).connect(this.haasSum);
+    this.tremGain.connect(this.haasSplit);
+    this.haasSplit.connect(this.haasL, 0);
+    this.haasSplit.connect(this.haasR, 1);
+    this.haasL.connect(this.haasMerge, 0, 0);
+    this.haasR.connect(this.haasMerge, 0, 1);
+    this.haasMerge.connect(this.haasOn).connect(this.haasSum);
+
+    // 8D rotation, in parallel with the straight path
+    this.haasSum.connect(this.spinDry).connect(this.spinSum);
+    this.haasSum.connect(this.spin).connect(this.spinWet).connect(this.spinSum);
+
+    this.spinSum.connect(this.brick).connect(this.limited).connect(this.out);
+    this.spinSum.connect(this.direct).connect(this.out);
 
     this.out.connect(this.master).connect(destination ?? ctx.destination);
     this.out.connect(this.analyser);
@@ -355,6 +525,18 @@ export class MixerChannel {
     s.reverbSize = clamp(s.reverbSize, 0.3, 6);
     s.reverbDamp = clamp(s.reverbDamp, 0, 1);
     s.width = clamp(s.width, 0, 2);
+    s.rotate = clamp(s.rotate, 0, 1);
+    s.rotateRate = clamp(s.rotateRate, 2, 30);
+    s.rotateHeight = clamp(s.rotateHeight, -1, 1);
+    s.haas = clamp(s.haas, 0, 40);
+    s.chorus = clamp(s.chorus, 0, 1);
+    s.chorusRate = clamp(s.chorusRate, 0.05, 6);
+    s.flanger = clamp(s.flanger, 0, 1);
+    s.flangerFeedback = clamp(s.flangerFeedback, 0, 0.9);
+    s.phaser = clamp(s.phaser, 0, 1);
+    s.phaserRate = clamp(s.phaserRate, 0.05, 6);
+    s.tremolo = clamp(s.tremolo, 0, 1);
+    s.tremoloRate = clamp(s.tremoloRate, 0.1, 16);
     s.pan = clamp(s.pan, -1, 1);
     s.gain = clamp(s.gain, 0, 2);
     s.ceiling = clamp(s.ceiling, -12, 0);
@@ -402,6 +584,30 @@ export class MixerChannel {
     this.ramp(this.sideRneg.gain, -0.5 * s.width);
     this.panner.pan.value = s.pan;
 
+    /* ------------------------------- movement ------------------------- */
+    this.ramp(this.spinWet.gain, s.rotate);
+    this.ramp(this.spinDry.gain, 1 - s.rotate);
+    if (s.rotate > 0 && !this.spinTimer) this.startSpin();
+    if (s.rotate === 0 && this.spinTimer) { clearInterval(this.spinTimer); this.spinTimer = 0; }
+
+    this.ramp(this.haasL.delayTime, s.haas / 1000);
+    this.ramp(this.haasOn.gain, s.haas > 0 ? 1 : 0);
+    this.ramp(this.haasBypass.gain, s.haas > 0 ? 0 : 1);
+
+    this.chorusLfo.frequency.value = s.chorusRate;
+    this.ramp(this.chorusDepth.gain, s.chorus * 0.004);      // ±4 ms of sweep
+    this.ramp(this.chorusWet.gain, s.chorus * 0.7);
+    this.flangeLfo.frequency.value = 0.25;
+    this.ramp(this.flangeDepth.gain, s.flanger * 0.004);
+    this.ramp(this.flangeFb.gain, s.flangerFeedback);
+    this.ramp(this.flangeWet.gain, s.flanger * 0.7);
+    this.phaserLfo.frequency.value = s.phaserRate;
+    this.ramp(this.phaserDepth.gain, s.phaser * 1200);
+    this.ramp(this.phaserWet.gain, s.phaser * 0.7);
+    this.tremLfo.frequency.value = s.tremoloRate;
+    this.ramp(this.tremDepth.gain, s.tremolo * 0.5);
+    this.ramp(this.tremGain.gain, 1 - s.tremolo * 0.5);
+
     this.ramp(this.brick.threshold, s.ceiling);
     this.ramp(this.limited.gain, s.limiter ? 1 : 0);
     this.ramp(this.direct.gain, s.limiter ? 0 : 1);
@@ -409,6 +615,34 @@ export class MixerChannel {
   }
 
   private curveDrive = -1;
+
+  /**
+   * Move the 3D source around the listener. The position is written ahead of
+   * time on the audio clock (not on a React tick), so the circle is smooth
+   * even when the main thread is busy decoding the next song.
+   */
+  private startSpin() {
+    const step = () => {
+      const s = this.settings;
+      if (!s.rotate) return;
+      const now = this.ctx.currentTime;
+      const ahead = 0.25;
+      this.spinPhase += (ahead / s.rotateRate) * Math.PI * 2;
+      const r = 1.6;
+      const x = Math.sin(this.spinPhase) * r;
+      const z = Math.cos(this.spinPhase) * r;
+      const y = s.rotateHeight * r * 0.6;
+      try {
+        this.spin.positionX.linearRampToValueAtTime(x, now + ahead);
+        this.spin.positionY.linearRampToValueAtTime(y, now + ahead);
+        this.spin.positionZ.linearRampToValueAtTime(z, now + ahead);
+      } catch {
+        this.spin.setPosition?.(x, y, z);
+      }
+    };
+    step();
+    this.spinTimer = window.setInterval(step, 200);
+  }
 
   /**
    * Build the reverb's impulse response: shaped noise with an exponential
@@ -467,12 +701,21 @@ export class MixerChannel {
   }
 
   dispose() {
+    if (this.spinTimer) { clearInterval(this.spinTimer); this.spinTimer = 0; }
+    [this.chorusLfo, this.flangeLfo, this.phaserLfo, this.tremLfo]
+      .forEach((o) => { try { o.stop(); o.disconnect(); } catch {} });
     [this.input, this.hp, this.lp, this.b1, this.b2, this.b3, this.b4, this.b5, this.b6,
       this.shaper, this.driveWet, this.driveDry, this.driveSum,
       this.compIn, this.comp, this.compWet, this.compDry, this.makeupGain,
       this.dry, this.delaySend, this.delay, this.feedback, this.revSend, this.convolver,
       this.wetSum, this.splitter, this.merger, this.midGain,
       this.sideLpos, this.sideLneg, this.sideRpos, this.sideRneg, this.widthOut, this.panner, this.brick, this.limited, this.direct,
+      this.spinDry, this.spinWet, this.spin, this.spinSum,
+      this.haasL, this.haasR, this.haasSplit, this.haasMerge, this.haasBypass, this.haasOn, this.haasSum,
+      this.modIn, this.chorusDelay, this.chorusDepth, this.chorusWet,
+      this.flangeDelay, this.flangeDepth, this.flangeFb, this.flangeWet,
+      ...this.phaserStages, this.phaserDepth, this.phaserWet,
+      this.tremGain, this.tremDepth, this.modDry, this.modSum,
       this.out, this.master, this.analyser]
       .forEach((n) => { try { n?.disconnect(); } catch {} });
   }

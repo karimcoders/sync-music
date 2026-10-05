@@ -811,8 +811,14 @@ export class P2PSpeakerClient {
     this.set({ info: null, hostMic: false });
   }
 
+  /** how many chase rounds have produced no new pieces at all */
+  private chaseStalled = 0;
+  private chaseSeen = -1;
+
   private startChunkChase() {
     window.clearInterval(this.chaseTimer);
+    this.chaseStalled = 0;
+    this.chaseSeen = -1;
     this.chaseTimer = window.setInterval(() => {
       const inc = this.incoming;
       if (!inc) { window.clearInterval(this.chaseTimer); return; }
@@ -820,6 +826,31 @@ export class P2PSpeakerClient {
       const missing: number[] = [];
       for (let i = 0; i < inc.chunks && missing.length < 400; i++) if (!inc.parts[i]) missing.push(i);
       if (!missing.length) return;
+
+      // Is this actually getting anywhere? A phone that asks for 131 pieces,
+      // then 150, then 150 again is not recovering — it is shouting into a
+      // channel that is not answering (a host on a different build, a sender
+      // that moved on, a transfer that died mid-way). Asking the same
+      // question faster does not help, so after a few fruitless rounds we
+      // stop and get the song a different way.
+      if (inc.got === this.chaseSeen) this.chaseStalled++;
+      else { this.chaseStalled = 0; this.chaseSeen = inc.got; }
+
+      if (this.chaseStalled >= 4) {
+        window.clearInterval(this.chaseTimer);
+        const trackId = inc.trackId;
+        this.incoming = null;
+        const cloud = this.cloudInfo.get(trackId);
+        if (cloud) {
+          this.set({ info: 'That transfer stalled — downloading the song directly instead.' });
+          void this.pullFromCloud(trackId, cloud.title, cloud.mime, cloud.url);
+        } else {
+          this.set({ info: 'That transfer stalled — asking the host to send the song again.' });
+          this.askForTrack(trackId);
+        }
+        return;
+      }
+
       this.lastChunkAt = Date.now();
       this.set({ info: `Re-requesting ${missing.length} missing piece(s) of the track…` });
       this.send({ type: 'TRACK_NEED', trackId: inc.trackId, indexes: missing });
