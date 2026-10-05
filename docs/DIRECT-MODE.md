@@ -853,3 +853,17 @@ p2p-e2e        : spread 9.1 ms after 6 s, no sync-loop restarts, 13.2 ms after a
 One guard had to be put back after the merge: the drift loop must not restart
 playback while a file is still arriving (`busy = !!this.incoming`). Without it
 p2p-e2e measured 7 restarts and 4 audible breaks in 8 s — the chopping.
+
+### A mixer move is not a transport command
+
+The first version of `MIX` carried `seq: ++cmdSeq`. That is the transport's
+command counter: bumping it told every speaker it had missed a command, and the
+host answered each gap with a full STATE repair — five slider moves produced
+twelve repairs, a burst of traffic in the middle of the song for nothing. `MIX`
+now carries its own `rev`, counted separately, and `mixer-real-e2e` asserts it:
+
+```
+  cmdSeq across 5 slider moves: 1791178397377 -> 1791178397377
+✓ moving the mixer does not bump the transport sequence (no repair storm)
+✓ the last mixer move still reached the speaker
+```

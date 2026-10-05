@@ -147,6 +147,23 @@ await spk.waitForTimeout(400);
   await host.evaluate(() => window.__syncHost.setRoomMix('music', { bass: 0 }));
 }
 
+/* ---- a mixer move must not look like a missed transport command ---- */
+{
+  const seqBefore = await host.evaluate(() => window.__syncHost.cmdSeq);
+  for (const bass of [3, 6, 9, 6, 3]) {
+    await host.evaluate((v) => window.__syncHost.setRoomMix('music', { bass: v }), bass);
+    await host.waitForTimeout(250);
+  }
+  const seqAfter = await host.evaluate(() => window.__syncHost.cmdSeq);
+  console.log(`  cmdSeq across 5 slider moves: ${seqBefore} -> ${seqAfter}`);
+  if (seqAfter === seqBefore) ok('moving the mixer does not bump the transport sequence (no repair storm)');
+  else fail(`five slider moves bumped cmdSeq by ${seqAfter - seqBefore} — every speaker then asks for a full STATE repair`);
+  const got = await spk.evaluate(() => window.__syncClient.mixOf('music').bass);
+  if (Math.abs(got - 3) < 0.01) ok('the last mixer move still reached the speaker');
+  else fail(`the speaker ended on bass ${got}, not 3`);
+  await host.evaluate(() => window.__syncHost.setRoomMix('music', { bass: 0 }));
+}
+
 await b.close();
 console.log(bad ? '\nSOME CHECKS FAILED' : '\nALL CHECKS PASSED');
 process.exit(bad ? 1 : 0);

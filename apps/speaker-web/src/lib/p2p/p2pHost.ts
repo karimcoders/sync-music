@@ -1300,9 +1300,12 @@ export class P2PHostClient {
     for (const ch of ['music', 'voice'] as const) {
       const st = this.roomMix[ch];
       if (st && Object.keys(st).length)
-        this.send(c.conn, { type: 'MIX', seq: ++this.cmdSeq, channel: ch, settings: st });
+        this.send(c.conn, { type: 'MIX', rev: ++this.mixRev, channel: ch, settings: st });
     }
   }
+
+  /** mixer revisions, counted apart from the transport's cmdSeq */
+  private mixRev = 0;
 
   /** the room-wide mixer, mastered by the host */
   private roomMix: Record<string, Record<string, number | boolean>> = (() => {
@@ -1317,7 +1320,8 @@ export class P2PHostClient {
     const cur = this.roomMix[channel] || {};
     this.roomMix = { ...this.roomMix, [channel]: { ...cur, ...settings } };
     try { localStorage.setItem(MIX_STORE, JSON.stringify(this.roomMix)); } catch {}
-    this.broadcastReliable({ type: 'MIX', seq: ++this.cmdSeq, channel, settings });
+    // its own counter: bumping cmdSeq here made the speakers ask for a repair
+    this.broadcastReliable({ type: 'MIX', rev: ++this.mixRev, channel, settings });
   }
 
   roomMixOf(channel: 'music' | 'voice'): Record<string, number | boolean> {

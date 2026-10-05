@@ -60,7 +60,11 @@ export type P2PMessage =
    * was purely local: the person at the host moved bass and nothing anywhere
    * else changed, which is what "the mixer does nothing" meant.
    */
-  | { type: 'MIX'; seq: number; channel: 'music' | 'voice'; settings: Record<string, number | boolean> }
+  // NOTE: `rev`, deliberately NOT `seq`. A mixer move is not a transport
+  // command: giving it a cmdSeq made every speaker believe it had missed a
+  // command, and the host answered each one with a full STATE repair — five
+  // slider moves produced twelve repairs.
+  | { type: 'MIX'; rev: number; channel: 'music' | 'voice'; settings: Record<string, number | boolean> }
   | { type: 'RENAME'; name: string }
   /**
    * "This is the song that comes next." Not a command (no seq, no timing): it
