@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { AppBar, Button, Card, Row, Shell, Stack, useMood } from '../ui';
 import { FLAT, PRESETS, type MixerSettings } from '../lib/audio/mixer';
 import { getSpeaker } from '../lib/p2p/speakerSingleton';
+import { getHost } from '../lib/p2p/hostSingleton';
 
 type Chan = 'music' | 'voice';
 
@@ -15,21 +16,24 @@ type Chan = 'music' | 'voice';
  */
 export default function Mixer({ go }: { go: (p: string) => void }) {
   const client = getSpeaker();
-  // If this device is also running the host, the desk is the ROOM's desk: the
-  // sound engineer expects a move here to be heard on every speaker, not only
-  // in their own hand. Without this the mixer was local-only, which is what
-  // "the mixer does nothing" really meant.
-  const host = (window as any).__syncHost;
+  // If this device is also running the host, this is the ROOM's desk: a move
+  // here must be heard on every speaker, not only in the engineer's own hand.
+  // The host lives in hostSingleton, so it is still here after a tab switch.
+  const host = getHost() as any;
   const isDesk = !!host && typeof host.setRoomMix === 'function';
+  const [roomWide, setRoomWide] = useState(true);
   const toRoom = (patch: Partial<MixerSettings>) => {
     if (isDesk && roomWide) host.setRoomMix(chan, patch as Record<string, number | boolean>);
   };
-  const [roomWide, setRoomWide] = useState(true);
+  const [, repaint] = useState(0);
   const [chan, setChan] = useState<Chan>('music');
   const [vals, setVals] = useState<MixerSettings>(() => client?.mixOf('music') ?? { ...FLAT });
   const [reduction, setReduction] = useState(0);
 
   useMood('connected');
+
+  // follow the running speaker (it keeps running while this page is open)
+  useEffect(() => client?.subscribe(() => repaint((n) => n + 1)), [client]);
 
   useEffect(() => { setVals(client?.mixOf(chan) ?? { ...FLAT }); }, [chan, client]);
 
@@ -59,14 +63,13 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
           <Row>
             <div>
               <div className="kicker">Where these controls apply</div>
-              <div className="muted" style={{ marginTop: 4 }}>
+              <div className="tiny" style={{ marginTop: 4 }}>
                 {roomWide
                   ? 'Every connected speaker, and this phone.'
                   : 'Only this phone. The speakers keep their own sound.'}
               </div>
             </div>
-            <button className="chip" data-testid="mix-scope"
-                    onClick={() => setRoomWide(!roomWide)}>
+            <button className="chip" data-testid="mix-scope" onClick={() => setRoomWide(!roomWide)}>
               {roomWide ? 'All speakers' : 'This phone'}
             </button>
           </Row>
@@ -82,10 +85,27 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
           <span className="tiny dim">{chan === 'music' ? 'the song' : "the host's mic"}</span>
         </Row>
 
-        {!live && (
+        {!client && (
+          <div style={{ marginTop: 10 }}>
+            <p className="tiny" style={{ margin: '0 0 8px' }}>
+              This phone is not in a room, so there is nothing to mix yet. Open
+              <b> Speaker</b>, join the host and tap once to start — the sliders
+              stay live while you switch tabs. What you set here is saved and
+              applied as soon as the sound starts.
+            </p>
+            <Button variant="ghost" onClick={() => go('/speaker')}>GO TO SPEAKER</Button>
+          </div>
+        )}
+        {client && !live && (
           <p className="tiny" style={{ marginTop: 10 }}>
-            Tap <b>Join as a speaker</b> first — the sliders are saved now and
-            applied the moment this phone starts playing.
+            Tap <b>anywhere to start</b> on the Speaker tab first — the sliders
+            are saved now and applied the moment this phone starts playing.
+          </p>
+        )}
+        {client && live && chan === 'voice' && !client.mixers.voice && (
+          <p className="tiny" style={{ marginTop: 10 }}>
+            The host’s microphone is off, so the voice strip appears when it is
+            switched on. Your settings are saved and will be used then.
           </p>
         )}
 

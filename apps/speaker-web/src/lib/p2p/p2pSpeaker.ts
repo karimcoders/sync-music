@@ -36,7 +36,22 @@ export class P2PSpeakerClient {
   private wa: WebAudioPlayer | null = null;
   private ctx: AudioContext | null = null;
   private blob: Blob | null = null;
-  private decoding = false;
+  /**
+   * Every complete song this phone holds, kept in MEMORY. A switch to one of
+   * these needs no IndexedDB read and no network at all, so it is instant.
+   * (It used to go through an async IndexedDB lookup every single time, and a
+   * song whose cache write had not finished yet was simply downloaded again.)
+   */
+  private mem = new Map<string, { title: string; blob: Blob }>();
+  /** decoded PCM for at most two songs: the current one and the announced next one */
+  private decodedBufs = new Map<string, AudioBuffer>();
+  private decodeJobs = new Map<string, Promise<AudioBuffer | null>>();
+  /** songs this browser could not decode (format / out of memory): use the element */
+  private decodeFailed = new Set<string>();
+  /** the song the host last talked about, and the one it said comes next */
+  private hostTrack: string | null = null;
+  private nextHint: string | null = null;
+  private predecodeTimer = 0;
   private get audio(): any { return this.wa?.ready ? this.wa : this.el; }
   private audioEnabled = false;
 
@@ -68,7 +83,11 @@ export class P2PSpeakerClient {
     error: null, info: null,
   };
 
-  constructor(private roomId: string, private onChange: (s: UiState) => void) {}
+  private listeners = new Set<(s: UiState) => void>();
+  constructor(private roomId: string, onChange: (s: UiState) => void) { this.listeners.add(onChange); }
+  /** Several screens can watch one running client (it must outlive any single page). */
+  subscribe(fn: (s: UiState) => void) { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
+  get room() { return this.roomId; }
 
   /** diagnostics for tools/p2p-e2e.mjs */
   get debug() {
@@ -79,27 +98,76 @@ export class P2PSpeakerClient {
     };
   }
 
-  private set(p: Partial<UiState>) { this.state = { ...this.state, ...p }; this.onChange(this.state); }
+  private set(p: Partial<UiState>) { this.state = { ...this.state, ...p }; this.listeners.forEach((fn) => fn(this.state)); }
 
   /** Same entry point the server-mode client exposes; there is nothing to list. */
-  async autoConnect() { this.connect(); return []; }
+  /**
+   * The Speaker page calls this every few seconds while it has no session.
+   * It used to call connect() each time, and connect() destroys the peers it
+   * is in the middle of negotiating with — so on any link that needs more
+   * than 4 s to set up (every relayed / mobile-data connection) the phone
+   * restarted the attempt forever and never connected. Starting is now done
+   * once; retries are the client's own business (scheduleReconnect).
+   */
+  async autoConnect() { if (!this.started) this.connect(); return []; }
+
 
   private peers: Peer[] = [];
+  private started = false;
+  private connectedAt = 0;
+  private openBrokers = new Set<number>();
+  private missing = new Map<number, Set<string>>();
+  private dialsInFlight = 0;
+  /** bumped on every fresh attempt; a stale attempt's timers must not act on a newer one */
+  private round = 0;
+  private diagMap = new Map<string, string>();
+  /** timers that belong to ONE connection; they are cleared when it is replaced */
+  private connTimers: number[] = [];
+  private reportTimer = 0;
+
+  private clearConnTimers() {
+    this.connTimers.forEach((t) => { window.clearTimeout(t); window.clearInterval(t); });
+    this.connTimers = [];
+    window.clearTimeout(this.reportTimer);
+  }
+
+  /** One plain line of connection progress, shown on screen so it is never a mystery. */
+  private note(key: string, text: string | null) {
+    if (text === null) this.diagMap.delete(key); else this.diagMap.set(key, text);
+    this.set({ diag: [...this.diagMap.values()] });
+  }
 
   connect() {
+    this.started = true;
     this.closed = false;
-    this.set({ conn: 'connecting', phase: 'CONNECTING', info: 'Looking for the host…' });
+    this.clearConnTimers();
+    this.openBrokers.clear();
+    this.missing.clear();
+    this.dialsInFlight = 0;
+    this.round++;
+    this.connectedAt = Date.now();
+    this.diagMap.clear();
+    this.note('net', navigator.onLine === false
+      ? 'Internet: this phone reports it is OFFLINE'
+      : 'Internet: online');
+    this.set({ conn: 'connecting', phase: 'CONNECTING', info: 'Looking for the host…', error: null });
     // Register on EVERY broker at once. The host may have had to fall back to
     // a different one (the public one rate-limits and holds stale ids), and a
     // phone should not spend half a minute discovering that one by one.
     this.peers.forEach((p) => { try { p.destroy(); } catch {} });
     this.peers = BROKERS.map((_, b) => {
+      this.note(`b${b}`, `Broker ${b + 1}: connecting…`);
       const peer = new Peer(peerOptions(b));
-      peer.on('open', () => this.dial(peer));
+      peer.on('open', () => {
+        if (this.closed) return;
+        this.openBrokers.add(b);
+        this.note(`b${b}`, `Broker ${b + 1}: ready`);
+        this.dial(peer, b);
+      });
       // The host may open a live microphone; answer with no stream of our own.
       peer.on('call', (call) => {
         try { call.answer(); } catch { return; }
-        call.on('stream', (stream) => this.playMic(stream));
+        call.on('stream', (stream: MediaStream) => this.playMic(stream));
         call.on('close', () => this.stopMic());
       });
       peer.on('error', (e: any) => {
@@ -107,74 +175,148 @@ export class P2PSpeakerClient {
         // it must never disturb a connection we already have.
         if (this.conn?.open) return;
         if (e?.type === 'peer-unavailable') {
-          this.set({
-            conn: 'reconnecting', hostOnline: false,
-            info: 'Host is not online right now — retrying…',
-            error: this.retry > ROOM_SLOTS.length ? 'Nobody is hosting on this link right now. Ask them to open the host page.' : null,
-          });
+          this.onSlotMissing(b, /peer\s+(\S+)/.exec(String(e?.message ?? ''))?.[1] ?? '');
+          return;
         }
+        this.note(`b${b}`, `Broker ${b + 1}: ${e?.type ?? 'error'}${navigator.onLine === false ? ' (no internet)' : ''}`);
       });
       return peer;
     });
     this.peer = this.peers[0];
-    // If no broker produced a host within this window, move on to the next
-    // wave of slots. (Each dial has its own, shorter hop timer as well.)
-    this.timers.push(window.setTimeout(() => {
-      if (!this.closed && !this.conn?.open) this.scheduleReconnect(300);
-    }, 12000));
+    // Nothing at all answered (every broker down / no internet): start over.
+    this.connTimers.push(window.setTimeout(() => {
+      if (this.closed || this.conn?.open || this.dialsInFlight > 0 || this.openBrokers.size > 0) return;
+      this.set({ error: 'Could not reach the connection service. Check this phone’s internet, then it will keep trying.' });
+      this.scheduleReconnect(500);
+    }, 20000));
   }
 
+  /**
+   * "peer-unavailable" arrives once per EMPTY slot — three of the four slots
+   * are always empty, and the old code treated each one as "the host is
+   * offline" while the one real slot was still negotiating. Only conclude
+   * "nobody is hosting" when every slot on every reachable broker is empty.
+   */
+  private onSlotMissing(b: number, slot: string) {
+    const set = this.missing.get(b) ?? new Set<string>();
+    if (slot) set.add(slot);
+    this.missing.set(b, set);
+    this.checkNotFound();
+  }
+
+  private checkNotFound() {
+    if (this.closed || this.conn?.open) return;
+    const need = this.roomId === FIXED_ROOM_ID ? ROOM_SLOTS.length : 1;
+    const opened = [...this.openBrokers];
+    if (!opened.length) return;
+    const allEmpty = opened.every((b) => (this.missing.get(b)?.size ?? 0) >= need);
+    if (!allEmpty) return;
+    // a broker that has not opened yet could still be the one the host is on
+    const waited = Date.now() - this.connectedAt;
+    if (opened.length < BROKERS.length && waited < 8000) {
+      this.connTimers.push(window.setTimeout(() => this.checkNotFound(), 8000 - waited));
+      return;
+    }
+    this.note('host', 'Host: not found — nobody is hosting this room yet');
+    this.set({
+      conn: 'reconnecting', hostOnline: false,
+      info: 'Host is not online right now — retrying…',
+      error: this.retry >= 3 ? 'Nobody is hosting on this link right now. Ask them to open the host page and keep it open.' : null,
+    });
+    this.scheduleRedial();
+  }
+
+  /**
+   * "Nobody is hosting yet": keep our broker registrations (re-registering
+   * every second hammers the public broker and burns a new id each time) and
+   * just knock on the room slots again, at a steady pace so a host that
+   * starts a moment later is found within a couple of seconds.
+   */
+  private scheduleRedial() {
+    if (this.closed || this.reconnectPending) return;
+    this.reconnectPending = true;
+    this.retry++;
+    const wait = Math.min(3000, 1000 + 500 * this.retry);
+    this.timers.push(window.setTimeout(() => {
+      this.reconnectPending = false;
+      if (this.closed || this.conn?.open) return;
+      this.missing.clear();
+      this.round++;
+      this.peers.forEach((pr, b) => {
+        if (!this.openBrokers.has(b)) return;
+        try { this.dial(pr, b); } catch { /* that broker will be retried by the next full reconnect */ }
+      });
+    }, wait));
+  }
+
+  private scheduleReconnect(fixedWait?: number) {
+    if (this.closed || this.reconnectPending) return;
+    if (this.conn?.open) return;              // already have a live channel
+    this.reconnectPending = true;
+    this.retry++;
+    const wait = fixedWait ?? Math.min(8000, 800 * 2 ** Math.min(this.retry, 4));
+    this.timers.push(window.setTimeout(() => {
+      this.reconnectPending = false;
+      if (this.closed) return;
+      try { this.peers.forEach((p) => p.destroy()); } catch {}
+      this.connect();
+    }, wait));
+  }
 
   /**
    * The room is one shared link but a short list of broker slots (the public
-   * broker can keep a name reserved after a host leaves). Walk the list until
-   * a host answers — the phone never has to be told which slot is live.
+   * broker can keep a name reserved after a host leaves). All slots are tried
+   * at once; the first channel that opens wins and the rest are dropped.
    */
-
-  private waveIndex = 0;
-
-  private dial(peer: Peer) {
-    // Dial every slot AT ONCE. Scanning them one by one took seconds before a
-    // phone found the host; in parallel the first channel that opens wins and
-    // the rest are dropped.
-    // A phone should not open a dozen channels at once, so the slots are
-    // dialled in small waves; the first one that answers wins and the rest
-    // are dropped.
-    const all = this.roomId === FIXED_ROOM_ID ? ROOM_SLOTS : [this.roomId];
-    // Two at a time per broker: a phone negotiating a dozen ICE sessions at
-    // once spends its CPU and radio on that instead of on smooth playback.
-    // All four slots at once (there are only four), one broker at a time:
-    // the live host answers within a second or two and the rest are dropped.
-    const per = 4;
-    const wave = this.waveIndex % Math.ceil(all.length / per);
-    this.waveIndex++;
-    const targets = all.length > per ? all.slice(wave * per, wave * per + per) : all;
+  private dial(peer: Peer, b: number) {
+    const targets = this.roomId === FIXED_ROOM_ID ? ROOM_SLOTS : [this.roomId];
+    const round = this.round;
+    this.dialsInFlight++;
+    let settled = false;
+    const settle = () => { if (!settled) { settled = true; this.dialsInFlight--; } };
+    this.note('host', `Host: looking on ${targets.length} room slot${targets.length > 1 ? 's' : ''}…`);
     const tried = targets.map((t) => peer.connect(t, { reliable: true }));
     let won: DataConnection | null = null;
 
+    // A relayed WebRTC link on mobile data legitimately needs 10–20 s. The
+    // old 5 s watchdog closed the channel in the middle of that negotiation and
+    // started over, so a slow-but-working link never completed.
+    const started = Date.now();
     const watchdog = window.setTimeout(() => {
-      if (won || this.state.conn === 'connected') return;
+      settle();
+      if (won || this.conn?.open || round !== this.round) return;   // a newer attempt owns the state now
+      this.note('link', 'Link: could not be opened in 25 s');
       this.set({
-        error: 'Could not reach the host. Both phones need internet, and the host tab must '
-          + 'stay open. If one of you is on a restricted network, try the same Wi-Fi or '
-          + 'mobile hotspot.',
+        error: 'Found the room but could not open a link. Both phones need internet and the '
+          + 'host tab must stay open. On a restricted network, try the same Wi-Fi or a mobile hotspot.',
       });
       tried.forEach((c) => { try { c.close(); } catch {} });
-      this.scheduleReconnect(300);   // straight on to the next wave of slots
-    }, 5000);
-    this.timers.push(watchdog);
+      this.scheduleReconnect(300);
+    }, 25000);
+    this.connTimers.push(watchdog);
+
+    const poll = window.setInterval(() => {
+      if (won || settled || round !== this.round) { window.clearInterval(poll); return; }
+      const st = tried.map((c) => (c as any).peerConnection?.iceConnectionState).find(Boolean);
+      if (st) this.note('link', `Link: negotiating… ${Math.round((Date.now() - started) / 1000)} s (${st})`);
+    }, 1000);
+    this.connTimers.push(poll);
 
     tried.forEach((conn) => {
       conn.on('open', () => {
         if (won || this.state.conn === 'connected') { try { conn.close(); } catch {} return; }
         won = conn;
+        settle();
         this.conn = conn;
         this.peer = peer;
         // drop the brokers we no longer need
         this.peers.forEach((p) => { if (p !== peer) { try { p.destroy(); } catch {} } });
         this.peers = [peer];
         window.clearTimeout(watchdog);
+        window.clearInterval(poll);
         tried.forEach((o) => { if (o !== conn) { try { o.close(); } catch {} } });
+        this.note('host', 'Host: found');
+        this.note('link', 'Link: open');
         this.onConnected(conn);
       });
       conn.on('data', (d) => {
@@ -184,6 +326,7 @@ export class P2PSpeakerClient {
       });
       const lost = () => {
         if (won !== conn || this.conn !== conn) return;         // a dead slot, not our host
+        this.clearConnTimers();
         this.set({
           conn: 'reconnecting', hostOnline: false,
           info: this.transportPlaying ? 'Offline — playing from this phone.' : null,
@@ -196,7 +339,12 @@ export class P2PSpeakerClient {
   }
 
   private onConnected(conn: DataConnection) {
+    // everything that belonged to the previous connection stops here. These
+    // timers used to pile up on every reconnect (duplicate pings, duplicate
+    // STATUS reports, duplicate drift loops), which made a flaky link worse.
+    this.clearConnTimers();
     this.retry = 0;
+    this.reconnectPending = false;
     this.set({ conn: 'connected', sessionId: conn.peer, error: null, info: null,
       phase: this.audioEnabled ? 'AUDIO_READY' : 'AUDIO_DISABLED', hostOnline: true });
     void trackIds().then((cached) => {
@@ -207,13 +355,13 @@ export class P2PSpeakerClient {
     // and a bad offset here shows up directly as phones being apart. So we
     // probe hard for the first few seconds and keep a steady 1 Hz afterwards;
     // ClockSync keeps only the lowest-RTT third of the samples.
-    for (let i = 0; i < 10; i++) this.timers.push(window.setTimeout(() => this.ping(), i * 150));
-    this.timers.push(window.setInterval(() => this.ping(), 1000));
+    for (let i = 0; i < 10; i++) this.connTimers.push(window.setTimeout(() => this.ping(), i * 150));
+    this.connTimers.push(window.setInterval(() => this.ping(), 1000));
     this.lastInbound = Date.now();
     // PeerJS does not always fire 'close' when the host tab goes away (a
     // refresh, a crash, a dead Wi-Fi link). The host answers every PING, so
     // silence longer than a few seconds means the channel is gone.
-    this.timers.push(window.setInterval(() => {
+    this.connTimers.push(window.setInterval(() => {
       if (this.closed || this.reconnectPending) return;
       if (Date.now() - this.lastInbound > 6000) {
         this.set({
@@ -223,12 +371,12 @@ export class P2PSpeakerClient {
             : 'Lost the host — reconnecting…',
         });
         try { this.conn?.close(); } catch {}
+        this.clearConnTimers();
         this.scheduleReconnect();
       }
     }, 2000));
     this.startReporting();
   }
-
 
   /**
    * A dropped chunk used to mean the file never completed and that phone stayed
@@ -246,38 +394,44 @@ export class P2PSpeakerClient {
    * if it is there (instant) or from the host if it is not.
    */
   private wantedTrack: string | null = null;
-  /** the song the HOST says is current — the only authority on this */
-  private hostTrackId: string | null = null;
   private ensureTrack(trackId: string | null | undefined): boolean {
-    if (trackId) this.hostTrackId = trackId;
-    if (!trackId || trackId === this.trackId) return true;
+    if (!trackId) return true;
+    this.hostTrack = trackId;
+    if (trackId === this.trackId) return true;
     if (this.wantedTrack === trackId) return false;   // already fetching
-    this.wantedTrack = trackId;
 
-    // Do NOT go silent.
-    //
-    // This used to stop the music, throw the decoded song away and show
-    // "Switching to the new song…" for as long as the download took. On a
-    // real phone that is a hole in the party. The song already playing is a
-    // perfectly good thing to listen to until the new one is actually here,
-    // so it keeps playing and the swap happens the moment the file lands.
-    // Nothing is thrown away until there is something to replace it with.
-    const standIn = !!this.trackId && !this.el?.paused;
-    if (this.streamingId === trackId) return false;   // already streaming this very song
-    this.set({
-      phase: standIn ? 'PLAYING' : 'SYNCING',
-      info: standIn
-        ? 'New song is downloading — this one keeps playing until it is ready.'
-        : 'Getting the new song…',
-      bufferedPct: 0,
-    });
-    if (!standIn) {
-      try { this.el?.pause(); } catch {}
-      this.wa?.clear();
-      this.decodedId = null;
-      this.trackId = null;
+    // The host changed song: whatever is playing stops NOW.
+    try { this.el?.pause(); } catch {}
+    this.wa?.clear();
+    this.decodedId = null;
+    this.trackId = null;
+
+    // 1) Already in memory (the host prefetched it): switch with zero I/O.
+    const held = this.mem.get(trackId);
+    if (held) {
+      this.wantedTrack = null;
+      this.adoptTrack(trackId, held.title, held.blob, true, false);
+      return true;
     }
 
+    this.wantedTrack = trackId;
+    this.set({ phase: 'SYNCING', info: 'Switching to the new song…', bufferedPct: 0 });
+
+    // 2) Only open IndexedDB if it really holds this song; otherwise ask the
+    //    host immediately instead of spending a lookup first.
+    this.streamingId = null;
+    const cloud = this.cloudInfo.get(trackId);
+    if (cloud) {
+      // The song is in the cloud: start playing it from there NOW, and let the
+      // full copy download behind it. Do not also ask the host to push it.
+      if (this.audioEnabled && this.startStreaming(trackId, cloud.title, cloud.url)) {
+        void this.pullFromCloud(trackId, cloud.title, cloud.mime, cloud.url);   // the full copy, behind it
+        return true;
+      }
+      void this.pullFromCloud(trackId, cloud.title, cloud.mime, cloud.url);
+      return false;
+    }
+    if (!this.cachedIds.includes(trackId)) { this.askForTrack(trackId); return false; }
     void getTrack(trackId)
       .then((hit) => {
         if (this.wantedTrack !== trackId) return;     // the host moved on again
@@ -299,19 +453,12 @@ export class P2PSpeakerClient {
    */
   private shouldBeCurrent(trackId: string) {
     if (this.wantedTrack) return this.wantedTrack === trackId;
-    // The host TELLS us which song is current in every transport message.
-    // "First file to arrive wins" was the reason three phones could sit on
-    // three different songs: during the prefetch the files land in whatever
-    // order the network gives them.
-    if (this.hostTrackId) return this.hostTrackId === trackId;
+    // The host names the current song in every transport message. "First
+    // file to arrive wins" let phones end up on different songs, because
+    // during the prefetch files land in whatever order the network gives.
+    if (this.hostTrack) return this.hostTrack === trackId;
     if (this.trackId) return this.trackId === trackId;
-    // Nothing playing and the host has not named a song yet (the files
-    // usually arrive before the first PLAY): take it, so the phone is ready
-    // the instant the command comes. If it turns out to be the wrong song,
-    // the next transport message names the right one and ensureTrack swaps
-    // it — that is what stops phones playing different songs, not refusing
-    // the file here.
-    return true;
+    return true;                       // nothing named yet: be ready the instant PLAY comes
   }
 
   /**
@@ -335,33 +482,19 @@ export class P2PSpeakerClient {
     this.timers.push(this.wantTimer);
   }
 
-  /**
-   * Download the song straight from the cloud copy.
-   *
-   * This is the whole reason a phone no longer sits at "Getting the new
-   * song… 51 %": instead of waiting its turn on the host's single uplink, it
-   * pulls the file over ordinary HTTPS, in parallel with every other phone,
-   * as fast as its own connection goes.
-   *
-   * Everything about it is best-effort. If the URL is unreachable, blocked,
-   * or the phone is offline, nothing is lost — the phone-to-phone transfer is
-   * still running underneath and will finish the job.
-   */
+  /* ------------------------------ cloud copy ----------------------------- */
+
+  /** where each song can be fetched from (sent by the host as TRACK_URL) */
+  private cloudInfo = new Map<string, { title: string; mime: string; url: string }>();
   private cloudPulls = new Set<string>();
+  /** the song the <audio> element is streaming straight from a URL right now */
   private streamingId: string | null = null;
 
   /**
-   * Start the song NOW, from the URL, without waiting for the download.
-   *
-   * This is the answer to "why does it wait for 100 % before it plays?". It
-   * does not have to: an <audio> element given a URL streams it, asking the
-   * server only for the bytes it needs next (HTTP range requests), so sound
-   * starts after about a second instead of after the whole file.
-   *
-   * The full copy still downloads quietly behind it. When it lands, the song
-   * is decoded and playback hands over to the sample-accurate engine without
-   * a gap — streaming gets the music out fast, the decoded copy makes it
-   * exact.
+   * Start the song NOW, from the URL, without waiting for the download. An
+   * <audio> element given a URL streams it with HTTP range requests, so sound
+   * starts after about a second; the full copy downloads quietly behind it and
+   * the decoded, sample-accurate engine takes over when it lands.
    */
   private startStreaming(trackId: string, title: string, url: string): boolean {
     const el = this.el;
@@ -372,26 +505,15 @@ export class P2PSpeakerClient {
       this.trackId = trackId;
       this.streamingId = trackId;
       if (this.wantedTrack === trackId) this.wantedTrack = null;
-      // The file comes from another origin. Without this the browser treats
-      // the element as "tainted" and Web Audio outputs SILENCE through it —
-      // the song would look like it was playing and nobody would hear a
-      // thing. The host serves it with access-control-allow-origin: *, so
-      // asking for an anonymous CORS fetch is all that is needed.
+      // Another origin: without CORS the element is "tainted" and Web Audio
+      // outputs silence through it. The file host sends access-control-allow-origin: *.
       el.crossOrigin = 'anonymous';
       el.src = url;
       el.dataset.audioId = trackId;
       el.load();
       this.wa?.attachElement(el);
       this.applyVolume();
-      this.set({ trackTitle: title, info: 'Playing while it downloads…', phase: 'PLAYING' });
-      if (this.transportPlaying) {
-        const go = () => {
-          try { el.currentTime = this.targetPosition(); } catch {}
-          void el.play().catch(() => {});
-        };
-        if (el.readyState >= 1) go();
-        else el.addEventListener('loadedmetadata', go, { once: true });
-      }
+      this.set({ trackTitle: title, info: 'Playing while it downloads…', phase: 'SYNCING', bufferedPct: 0 });
       return true;
     } catch {
       this.streamingId = null;
@@ -401,52 +523,55 @@ export class P2PSpeakerClient {
 
   private async pullFromCloud(trackId: string, title: string, mime: string, url: string) {
     if (this.cloudPulls.has(trackId)) return;
-    if (this.trackId === trackId && this.blob) return;      // already have it
-    const cached = await getTrack(trackId).catch(() => null);
-    if (cached) { this.send({ type: 'TRACK_READY', trackId }); return; }
+    if (this.mem.has(trackId)) { this.send({ type: 'TRACK_READY', trackId }); return; }
     this.cloudPulls.add(trackId);
-    const current = () => this.wantedTrack === trackId || this.hostTrackId === trackId;
-    // sound first: stream it right away if this is the song we are meant to
-    // be playing, then carry on fetching the real copy underneath
-    if (current() && this.streamingId !== trackId) this.startStreaming(trackId, title, url);
+    const current = () => this.wantedTrack === trackId || this.hostTrack === trackId;
+    // sound first, if this is the song we are meant to be playing
+    if (current() && this.streamingId !== trackId && this.trackId !== trackId) this.startStreaming(trackId, title, url);
     try {
       const bytes = await fetchTrack(url, (pct) => {
         if (!current()) return;
         this.set({
-          info: this.streamingId === trackId
-            ? `Playing while it downloads… ${pct}%`
-            : `Getting the song… ${pct}%`,
+          info: this.streamingId === trackId ? `Playing while it downloads… ${pct}%` : `Getting the song… ${pct}%`,
           bufferedPct: pct,
         });
       });
-      await putTrack({
+      void putTrack({
         id: trackId, title, artist: '', filename: title, mimeType: mime || 'audio/mpeg',
         size: bytes.byteLength, duration: 0, bytes,
-      });
-      this.send({ type: 'TRACK_READY', trackId });
-      // The full copy is here. Hand over from the stream to the decoded,
-      // sample-accurate engine — same song, same position, no gap.
-      if (current() || this.streamingId === trackId || !this.trackId) {
-        this.streamingId = null;
-        this.adoptTrack(trackId, title, new Blob([bytes], { type: mime || 'audio/mpeg' }), true);
-      }
+      }).then(() => { if (!this.cachedIds.includes(trackId)) this.cachedIds.push(trackId); }).catch(() => {});
+      // the full copy is here: adopt it (this also tells the host)
+      this.adoptTrack(trackId, title, new Blob([bytes], { type: mime || 'audio/mpeg' }), this.shouldBeCurrent(trackId) || this.streamingId === trackId);
     } catch {
-      // the slow path is still running; say nothing alarming
+      // the phone-to-phone transfer is still running underneath; say nothing alarming
+      if (this.streamingId === trackId && !this.mem.has(trackId)) this.set({ info: 'Playing while it downloads…' });
     } finally {
       this.cloudPulls.delete(trackId);
     }
   }
 
-  /** Point playback at a complete track, wherever the bytes came from. */
-  private adoptTrack(trackId: string, title: string, blob: Blob, current = true) {
+  /** Keep a complete song in memory (small LRU; the live + announced songs are never evicted). */
+  private remember(id: string, title: string, blob: Blob) {
+    this.mem.delete(id);
+    this.mem.set(id, { title, blob });
+    for (const k of this.mem.keys()) {
+      if (this.mem.size <= 16) break;
+      if (k !== this.trackId && k !== this.nextHint && k !== this.hostTrack) this.mem.delete(k);
+    }
+  }
+
+  /**
+   * Point playback at a complete track, wherever the bytes came from.
+   * `catchUp` is false when the caller is about to schedule playback itself.
+   */
+  private adoptTrack(trackId: string, title: string, blob: Blob, current = true, catchUp = true) {
+    this.remember(trackId, title, blob);
     if (!current) {
       // keep it for later; do not touch what is playing
-      this.haveTrack = this.haveTrack ?? null;
       this.send({ type: 'TRACK_READY', trackId });
+      this.schedulePredecode();
       return;
     }
-    const replacing = !!this.trackId && this.trackId !== trackId;
-    if (replacing) { try { this.el?.pause(); } catch {} this.wa?.clear(); this.decodedId = null; }
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
     this.objectUrl = URL.createObjectURL(blob);
     this.blob = blob;
@@ -461,7 +586,8 @@ export class P2PSpeakerClient {
     if (this.audioEnabled) this.loadAudio();
     this.send({ type: 'TRACK_READY', trackId });
     // we may have been told to play while the file was still arriving
-    if (this.transportPlaying) this.catchUp();
+    if (catchUp && this.transportPlaying) this.catchUp();
+    this.schedulePredecode();
   }
 
   /* ------------------------------ YouTube ------------------------------- */
@@ -481,6 +607,7 @@ export class P2PSpeakerClient {
   private async applyYouTube(videoId: string | null, position: number, atHostTime: number, playing: boolean) {
     if (!videoId) {
       this.yt?.pause();
+      this.ytId = null;                 // so the same video can be started again later
       window.clearInterval(this.ytTimer);
       this.set({ youtubeId: null, info: null });
       return;
@@ -594,21 +721,48 @@ export class P2PSpeakerClient {
 
   /** Play the host's live microphone alongside the music. */
   private micAudio: HTMLAudioElement | null = null;
+
+  private ensureMicEl(): HTMLAudioElement {
+    if (!this.micAudio) {
+      const a = new Audio();
+      (a as any).playsInline = true;
+      a.autoplay = true;
+      this.micAudio = a;
+    }
+    return this.micAudio;
+  }
+
+  private tapToPlay(el: HTMLAudioElement, what: string) {
+    this.set({ info: `Tap the screen once to let ${what} through.` });
+    const retry = () => {
+      void el.play().then(() => this.set({ info: 'The host is speaking live.' })).catch(() => {});
+      document.removeEventListener('pointerdown', retry);
+    };
+    document.addEventListener('pointerdown', retry);
+  }
+
   private playMic(stream: MediaStream) {
-    // Route the voice through its own channel strip when we have a context.
-    // The muted <audio> element still has to exist and be playing: Chrome
-    // will not pull a WebRTC stream that is only connected to Web Audio.
+    // The element is created and attached FIRST, in every case. The mixer
+    // change used to attach the stream to Web Audio only, when no element
+    // existed yet — and Chrome delivers a remote WebRTC stream into Web Audio
+    // only while a media element is also playing it. Result: the host spoke
+    // and the phones stayed silent.
+    const el = this.ensureMicEl();
+    el.srcObject = stream;
     if (this.ctx) {
       try {
+        if (this.ctx.state === 'suspended') void this.ctx.resume();
         if (!this.voiceMixer) {
           this.voiceMixer = new MixerChannel(this.ctx);
           this.voiceMixer.apply(loadSettings('voice'));
         }
-        this.micSource?.disconnect();
+        this.voiceMixer.setMaster(this.state.muted ? 0 : this.state.volume);
+        try { this.micSource?.disconnect(); } catch {}
         this.micSource = this.ctx.createMediaStreamSource(stream);
         this.micSource.connect(this.voiceMixer.input);
-        if (this.micAudio) { this.micAudio.srcObject = stream; this.micAudio.muted = true; void this.micAudio.play().catch(() => {}); }
-        this.set({ hostMic: true });
+        el.muted = true;                       // the sound comes out through the mixer, not here
+        void el.play().catch(() => this.tapToPlay(el, 'the host’s microphone'));
+        this.set({ info: 'The host is speaking live.', hostMic: true });
         return;
       } catch { /* fall through to the plain element */ }
     }
@@ -616,27 +770,17 @@ export class P2PSpeakerClient {
   }
 
   private playMicPlain(stream: MediaStream) {
-    if (!this.micAudio) {
-      const a = new Audio();
-      (a as any).playsInline = true;
-      a.autoplay = true;
-      this.micAudio = a;
-    }
-    this.micAudio.srcObject = stream;
-    this.micAudio.muted = false;
-    this.micAudio.volume = this.state.volume ?? 1;
-    void this.micAudio.play().catch(() => {
-      this.set({ info: 'Tap the screen once to let the host\u2019s microphone through.' });
-      const retry = () => {
-        void this.micAudio?.play().then(() => this.set({ info: 'The host is speaking live.' })).catch(() => {});
-        document.removeEventListener('pointerdown', retry);
-      };
-      document.addEventListener('pointerdown', retry);
-    });
+    const el = this.ensureMicEl();
+    el.srcObject = stream;
+    el.muted = false;
+    el.volume = this.state.muted ? 0 : (this.state.volume ?? 1);
+    void el.play().catch(() => this.tapToPlay(el, 'the host’s microphone'));
     this.set({ info: 'The host is speaking live.', hostMic: true });
   }
 
   private stopMic() {
+    try { this.micSource?.disconnect(); } catch {}
+    this.micSource = null;
     if (!this.micAudio) return;
     try { this.micAudio.pause(); } catch {}
     this.micAudio.srcObject = null;
@@ -648,8 +792,6 @@ export class P2PSpeakerClient {
     this.chaseTimer = window.setInterval(() => {
       const inc = this.incoming;
       if (!inc) { window.clearInterval(this.chaseTimer); return; }
-      // 2.5 s of waiting before asking again was most of the stall a phone
-      // showed at "93%"; the hole is obvious long before that.
       if (Date.now() - this.lastChunkAt < 800) return;
       const missing: number[] = [];
       for (let i = 0; i < inc.chunks && missing.length < 400; i++) if (!inc.parts[i]) missing.push(i);
@@ -661,20 +803,6 @@ export class P2PSpeakerClient {
     this.timers.push(this.chaseTimer);
   }
 
-  private scheduleReconnect(fixedWait?: number) {
-    if (this.closed || this.reconnectPending) return;
-    if (this.conn?.open) return;              // already have a live channel
-    this.reconnectPending = true;
-    this.retry++;
-    // While we are still scanning the slot list, keep the hops quick.
-    const wait = fixedWait ?? Math.min(15000, 600 * 2 ** Math.min(this.retry, 5));
-    this.timers.push(window.setTimeout(() => {
-      this.reconnectPending = false;
-      if (this.closed) return;
-      try { this.peers.forEach((p) => p.destroy()); } catch {}
-      this.connect();
-    }, wait));
-  }
 
   private send(m: P2PMessage) { try { if (this.conn?.open) this.conn.send(m); } catch {} }
   private ping() { this.send({ type: 'PING', t1: Date.now() }); }
@@ -713,18 +841,27 @@ export class P2PSpeakerClient {
         break;
 
       case 'TRACK_META': {
-        // already have these exact bytes — never swap the blob we are playing
-        if (this.haveTrack === m.trackId && this.objectUrl) {
+        // already playing exactly these bytes — never swap the blob under us
+        if (this.trackId === m.trackId && this.objectUrl) {
           this.send({ type: 'TRACK_READY', trackId: m.trackId });
           break;
         }
-        // or we downloaded it on an earlier night: nothing to transfer at all
-        const cached = await getTrack(m.trackId);
-        if (cached) {
-          this.adoptTrack(m.trackId, cached.title, new Blob([cached.bytes], { type: cached.mimeType }),
-                          this.shouldBeCurrent(m.trackId));
+        // Held in memory (e.g. prefetched earlier, or we switched away from it
+        // and the host re-sent it): adopt it right now. THIS was the "stuck on
+        // Switching to the new song…" bug: the old code answered TRACK_READY
+        // and did nothing else, so a wanted song we already held never became
+        // the current one and the phone waited forever.
+        const held = this.mem.get(m.trackId);
+        if (held) {
+          this.adoptTrack(m.trackId, held.title, held.blob, this.shouldBeCurrent(m.trackId));
           break;
         }
+        // Register the incoming transfer BEFORE any await. The host streams
+        // chunks right behind this message; the old code awaited an
+        // IndexedDB lookup first, so the first chunks arrived with nowhere to
+        // go and were thrown away — every song then waited 2.5+ s for the
+        // "re-request missing pieces" timer. That was a large part of why a
+        // song change never felt instant.
         this.incoming = {
           trackId: m.trackId, title: m.title, mime: m.mime, chunks: m.chunks,
           parts: new Array(m.chunks), got: 0,
@@ -734,6 +871,16 @@ export class P2PSpeakerClient {
         }
         this.lastChunkAt = Date.now();
         this.startChunkChase();
+        // Saved on an earlier night? Look, but never block the transfer on it.
+        if (this.cachedIds.includes(m.trackId)) {
+          const cached = await getTrack(m.trackId);
+          if (cached && this.incoming?.trackId === m.trackId) {
+            window.clearInterval(this.chaseTimer);
+            this.incoming = null;
+            this.adoptTrack(m.trackId, cached.title, new Blob([cached.bytes], { type: cached.mimeType }),
+                            this.shouldBeCurrent(m.trackId));
+          }
+        }
         break;
       }
 
@@ -794,8 +941,10 @@ export class P2PSpeakerClient {
         this.transportPlaying = true;
         this.basePosition = m.position;
         this.baseHostTime = m.startAt;
+        this.hostTrack = m.trackId;
+        // a song replaces a video: leaving the video running put two different sounds on one phone
+        if (this.state.youtubeId) void this.applyYouTube(null, 0, 0, false);
         this.set({ playing: true });
-        this.hostTrackId = m.trackId ?? this.hostTrackId;
         if (!this.audioEnabled) { this.set({ phase: 'AUDIO_DISABLED' }); break; }
         if (!this.ensureTrack(m.trackId)) break;   // wrong song: stay silent until we have the right one
         this.loadAudio();
@@ -855,33 +1004,39 @@ export class P2PSpeakerClient {
         this.applyVolume();
         break;
 
-      case 'MIX':
-        // The host is the sound engineer: its strip settings win on every
-        // phone. setMix also persists them, so a phone that reloads keeps
-        // the room's sound instead of snapping back to flat.
-        this.setMix(m.channel, m.settings as Partial<MixerSettings>);
-        break;
-
       case 'YT':
         this.appliedSeq = Math.max(this.appliedSeq, m.seq);
         void this.applyYouTube(m.videoId, m.position, m.atHostTime, m.playing);
         break;
 
+      case 'RENAME':
+        this.set({ speakerName: m.name });
+        break;
+
+      case 'MIX':
+        // The host is the sound engineer: its strip wins on every phone.
+        // setMix persists it too, so a phone that reloads keeps the room's sound.
+        this.setMix(m.channel, m.settings as Partial<MixerSettings>);
+        break;
+
+      case 'BUILD':
+        // The host and this phone run different builds of the app. Different
+        // builds can disagree about the protocol, which shows up as phones that
+        // behave differently from each other. Say so instead of hiding it.
+        this.set({ hostBuild: m.build !== __BUILD__ ? m.build : null });
+        break;
+
       case 'TRACK_URL':
+        this.cloudInfo.set(m.trackId, { title: m.title, mime: m.mime, url: m.url });
+        // Download in the background right away (prefetch), but only start
+        // PLAYING it if it is the song the host is on.
         void this.pullFromCloud(m.trackId, m.title, m.mime, m.url);
         break;
 
       case 'NEXT_HINT':
-        // not a command: just decode the next song in the background
-        if (this.nextHint !== m.trackId) {
-          this.nextHint = m.trackId;
-          this.preDecoded.clear();     // only ever hold one song ahead
-          this.decodeAhead();
-        }
-        break;
-
-      case 'RENAME':
-        this.set({ speakerName: m.name });
+        this.nextHint = m.trackId;
+        this.trimDecoded();            // free the song we have moved past
+        this.schedulePredecode();
         break;
     }
   }
@@ -946,6 +1101,7 @@ export class P2PSpeakerClient {
       this.audioEnabled = true;
       this.keepPlayingWhenLocked();
       this.set({ phase: 'AUDIO_READY', error: null, info: null });
+      if (this.hostTrack && this.hostTrack !== this.trackId) this.ensureTrack(this.hostTrack);
       this.loadAudio();
       if (this.transportPlaying) this.catchUp();
       return true;
@@ -963,13 +1119,17 @@ export class P2PSpeakerClient {
     if (!el || !this.objectUrl || !this.trackId) return;
     // compare the actual source, not just the id: after a host refresh the id
     // is the same but the blob behind it is new
-    if (el.dataset.audioId !== this.trackId || el.src !== this.objectUrl) {
+    // while the element is streaming this very song from the cloud, leave it
+    // alone: swapping to the blob would restart it. The decoded engine takes
+    // over (installBuffer) when it is ready.
+    const streaming = this.streamingId === this.trackId;
+    if (!streaming && (el.dataset.audioId !== this.trackId || el.src !== this.objectUrl)) {
       el.src = this.objectUrl;
       el.dataset.audioId = this.trackId;
       el.load();
     }
     // the element must go through the mixer too, or every slider does
-    // nothing until the song happens to be decoded
+    // nothing whenever the element (not the decoded buffer) is making the sound
     this.wa?.attachElement(el);
     this.decodeForExactPlayback();
     this.applyVolume();
@@ -977,84 +1137,113 @@ export class P2PSpeakerClient {
 
   /**
    * Decode the song into memory so playback can be scheduled exactly.
-   * Costs a second or two of CPU once; buys a song that never re-buffers.
+   *
+   * Three real bugs lived here:
+   *  1. `if (this.decoding) return` — a switch during a decode skipped the NEW
+   *     song's decode for good, and the OLD decode then installed the OLD
+   *     song's audio under the new title.
+   *  2. A failed decode (unsupported format / out of memory) was swallowed
+   *     and schedulePlay then waited for a buffer that would never come:
+   *     "Preparing the song…" forever, no sound.
+   *  3. Every switch paid the full decode (seconds, on a phone) at the worst
+   *     possible moment. Now the host announces the next song and we decode
+   *     it in the background, so the switch just installs a finished buffer.
    */
   private decodedId: string | null = null;
+  private static readonly PREPARING = 'Preparing the song on this phone — it will join in a moment.';
+
+  /** true while we are still waiting for a buffer that can actually arrive */
+  private decodePending() {
+    if (this.trackId && this.streamingId === this.trackId) return false;   // the element is already playing it
+    return !!this.wa && !this.wa.ready && !(this.trackId && this.decodeFailed.has(this.trackId));
+  }
+
   private decodeForExactPlayback() {
-    const blob = this.blob;
     const id = this.trackId;
-    if (!this.wa || !blob || !id || this.decoding || this.decodedId === id) return;
-    // already decoded ahead of time? install it instantly — this is what makes
-    // a song change cost nothing instead of a second or two of CPU
-    const warm = this.preDecoded.get(id);
-    if (warm) {
-      this.preDecoded.delete(id);
-      this.wa.setBuffer(warm);
-      this.decodedId = id;
-      this.afterDecode();
+    const blob = this.blob;
+    if (!this.wa || !blob || !id || this.decodedId === id || this.decodeFailed.has(id)) return;
+    const done = this.decodedBufs.get(id);
+    if (done) { this.installBuffer(id, done, false); return; }      // pre-decoded: instant
+    void this.decodeOnce(id, blob).then((buf) => {
+      if (this.trackId !== id) return;            // the host moved on while we decoded: drop it
+      if (!buf) {                                 // cannot decode: fall back to the element
+        this.set({ info: null });
+        if (this.transportPlaying && this.audioEnabled) this.catchUp();
+        return;
+      }
+      this.installBuffer(id, buf, true);
+    });
+  }
+
+  private decodeOnce(id: string, blob: Blob): Promise<AudioBuffer | null> {
+    const have = this.decodedBufs.get(id);
+    if (have) return Promise.resolve(have);
+    const wa = this.wa;
+    if (!wa) return Promise.resolve(null);
+    let job = this.decodeJobs.get(id);
+    if (!job) {
+      job = wa.decode(blob)
+        .then((buf) => { this.decodedBufs.set(id, buf); this.trimDecoded(); return buf as AudioBuffer | null; })
+        .catch(() => { this.decodeFailed.add(id); return null; })
+        .finally(() => { this.decodeJobs.delete(id); });
+      this.decodeJobs.set(id, job);
+    }
+    return job;
+  }
+
+  /** keep decoded audio for the current and the announced next song only */
+  private trimDecoded() {
+    for (const k of [...this.decodedBufs.keys()]) {
+      if (k !== this.trackId && k !== this.nextHint) this.decodedBufs.delete(k);
+    }
+  }
+
+  private installBuffer(id: string, buf: AudioBuffer, resume: boolean) {
+    if (!this.wa || this.trackId !== id || this.decodedId === id) return;
+    this.wa.setBuffer(buf);
+    this.decodedId = id;
+    if (this.streamingId === id) this.streamingId = null;   // the exact engine has taken over
+    this.set({
+      duration: buf.duration, bufferedPct: 100,
+      info: this.state.info === P2PSpeakerClient.PREPARING ? null : this.state.info,
+    });
+    this.applyVolume();
+    if (resume && this.transportPlaying && this.audioEnabled) {
+      // hand over from the element mid-song without a gap
+      try { this.el?.pause(); } catch {}
+      this.catchUp();
+    }
+  }
+
+  /** Decode the announced next song in the background, once things are quiet. */
+  private schedulePredecode() {
+    window.clearTimeout(this.predecodeTimer);
+    this.predecodeTimer = window.setTimeout(() => this.predecodeNext(), 1500);
+    this.timers.push(this.predecodeTimer);
+  }
+
+  private predecodeNext() {
+    const id = this.nextHint;
+    if (!id || !this.audioEnabled || !this.wa || id === this.trackId) return;
+    if (this.decodedBufs.has(id) || this.decodeJobs.has(id) || this.decodeFailed.has(id)) return;
+    // let the song that is playing finish its own decode first
+    if (this.trackId && this.decodedId !== this.trackId && !this.decodeFailed.has(this.trackId)) {
+      this.schedulePredecode();
       return;
     }
-    this.decoding = true;
-    void this.wa.decode(blob)
-      .then((buf) => {
-        // The song changed while we were decoding: throw this away. Installing
-        // it would make the phone play the previous song under the new title.
-        if (this.trackId !== id || !this.wa) return;
-        this.wa.setBuffer(buf);
-        this.decodedId = id;
-        this.set({ duration: this.wa?.duration || this.state.duration, bufferedPct: 100 });
-        // hand over from the element mid-song without a gap
-        if (this.transportPlaying && this.audioEnabled) {
-          try { this.el?.pause(); } catch {}
-          this.resyncExact();
-          this.set({ phase: 'PLAYING', playing: true, info: null });
-        }
-        this.applyVolume();
-      })
-      .catch(() => { /* undecodable format — the element fallback still works */ })
-      .finally(() => { this.decoding = false; this.decodeAhead(); });
-  }
-
-  /** shared tail of "a decoded song just became current" */
-  private afterDecode() {
-    this.set({ duration: this.wa?.duration || this.state.duration, bufferedPct: 100 });
-    if (this.transportPlaying && this.audioEnabled) {
-      try { this.el?.pause(); } catch {}
-      this.resyncExact();
-      this.set({ phase: 'PLAYING', playing: true, info: null });
-    }
-    this.applyVolume();
-    this.decodeAhead();
-  }
-
-  /**
-   * Decode the NEXT song quietly, while the current one plays, so that
-   * pressing next is just a pointer swap.
-   *
-   * Honest cost: one extra decoded song in memory (~21 MB per minute of
-   * stereo audio). Only ever one, and it is dropped as soon as the hint
-   * changes, so a long playlist does not accumulate.
-   */
-  private preDecoded = new Map<string, AudioBuffer>();
-  private nextHint: string | null = null;
-  private decodeAhead() {
-    const id = this.nextHint;
-    if (!id || !this.wa || this.decoding) return;
-    if (id === this.trackId || this.preDecoded.has(id)) return;
-    void getTrack(id).then((rec) => {
-      if (!rec || this.nextHint !== id || !this.wa || this.decoding) return;
-      this.decoding = true;
-      this.wa.decode(new Blob([rec.bytes], { type: rec.mimeType }))
-        .then((buf) => { if (this.nextHint === id) this.preDecoded.set(id, buf); })
-        .catch(() => {})
-        .finally(() => { this.decoding = false; });
-    }).catch(() => {});
+    // a very long song is hundreds of MB of PCM: never hold two of those
+    if (this.wa.bytesHeld > 160 * 1024 * 1024) return;
+    const held = this.mem.get(id);
+    if (!held) return;                  // not here yet — adoptTrack() will call us again
+    void this.decodeOnce(id, held.blob);
   }
 
   private applyVolume() {
     const v = this.state.muted ? 0 : this.state.volume;
     if (this.el) this.el.volume = v;
     if (this.wa) this.wa.volume = v;
+    this.voiceMixer?.setMaster(v);
+    if (this.micAudio && !this.micAudio.muted) this.micAudio.volume = v;
   }
 
   private updateBuffered() {
@@ -1111,9 +1300,9 @@ export class P2PSpeakerClient {
     // The element stutters — that is the whole reason the decoded player
     // exists. So if the song is not decoded yet we stay SILENT and say so,
     // rather than producing the broken sound and "fixing" it later.
-    if (this.wa && !this.wa.ready) {
+    if (this.decodePending()) {
       this.decodeForExactPlayback();
-      this.set({ phase: 'SYNCING', info: 'Preparing the song on this phone — it will join in a moment.' });
+      this.set({ phase: 'SYNCING', info: P2PSpeakerClient.PREPARING });
       return;
     }
     if (this.playTimer) window.clearTimeout(this.playTimer);
@@ -1166,11 +1355,9 @@ export class P2PSpeakerClient {
   private catchUp() {
     const a = this.audio;
     if (!a || !this.audioEnabled) return;
-    // still on the previous song while the new one arrives: leave it alone
-    if (this.wantedTrack && this.trackId && this.wantedTrack !== this.trackId) return;
-    if (this.wa && !this.wa.ready) {
+    if (this.decodePending()) {
       this.decodeForExactPlayback();
-      this.set({ phase: 'SYNCING', info: 'Preparing the song on this phone — it will join in a moment.' });
+      this.set({ phase: 'SYNCING', info: P2PSpeakerClient.PREPARING });
       return;
     }
     const untilStart = this.baseHostTime - this.clock.now();
@@ -1267,13 +1454,17 @@ export class P2PSpeakerClient {
         rate: a?.playbackRate ?? 1, playing: !!a && !a.paused, buffered: Math.max(0, buffered),
         clockRtt: Math.round(this.clock.rtt), clockSynced: this.clock.synced,
         clockSamples: this.clock.sampleCount,
-        seq: this.appliedSeq, haveTrack: this.haveTrack, cached: this.cachedIds,
+        seq: this.appliedSeq,
+        // a song we hold in memory counts as "had" even if it is not the live one yet,
+        // otherwise the host keeps re-sending a file that is already here
+        haveTrack: this.hostTrack && this.mem.has(this.hostTrack) ? this.hostTrack : this.haveTrack,
+        cached: this.cachedIds,
         selfDriftMs: a && !a.paused ? Math.round((a.currentTime - this.targetPosition()) * 1000) : 0,
       });
-      this.timers.push(window.setTimeout(report, 600));
+      this.reportTimer = window.setTimeout(report, 600);
     };
     report();
-    this.timers.push(window.setInterval(() => this.correctDrift(), 500));
+    this.connTimers.push(window.setInterval(() => this.correctDrift(), 500));
   }
 
   /**
@@ -1340,13 +1531,6 @@ export class P2PSpeakerClient {
     // Wait for a usable offset, not a perfect one: right after a (re)connect
     // the estimate is still settling, and refusing to correct during those
     // seconds is exactly when a phone drifts audibly away from the others.
-    // A stand-in song (the previous one, still playing while the new one
-    // downloads) must not be dragged onto the NEW song's timeline — that
-    // would seek it to a meaningless position.
-    if (this.wantedTrack && this.trackId && this.wantedTrack !== this.trackId) {
-      if (a) this.set({ position: a.currentTime });
-      return;
-    }
     const usable = this.clock.synced || this.clock.sampleCount >= 3;
     if (!a || !this.audioEnabled || !this.transportPlaying || a.paused || !usable) {
       if (a) this.set({ position: a.currentTime });
@@ -1394,19 +1578,13 @@ export class P2PSpeakerClient {
       if (Math.abs(e) > (settling ? 0.05 : 0.15)) {
         this.bigErrors = Math.sign(e) === Math.sign(this.lastErr) ? this.bigErrors + 1 : 1;
         this.lastErr = e;
-        // Settling used to restart on a SINGLE reading every 0.9 s, which on
-        // a busy phone (one still receiving the rest of the playlist) meant
-        // five restarts in the first eight seconds — audible chopping, and
-        // the measurements agreed: four rough steps, worst 87 ms. Two
-        // agreeing readings, and a faster rate ramp below, close the same
-        // gap without a single interruption.
         const need = settling ? 1 : urgent ? 2 : 3;
         const gap = settling ? 900 : urgent ? 2500 : 6000;
-        // While this phone is still receiving a file, its own main thread
-        // stalls on every arriving chunk, so the position reading is noisy —
-        // and restarting playback on a noisy reading is precisely the
-        // chopping people hear. Ride it out on the rate change; the transfer
-        // is over in seconds and the loop corrects properly then.
+        // While this phone is still receiving a file its main thread stalls on
+        // every arriving chunk, so the position reading is noisy — and
+        // restarting playback on a noisy reading is precisely the chopping
+        // people hear. Ride it out on the rate change instead; the transfer is
+        // over in seconds and the loop then corrects properly.
         const busy = !!this.incoming;
         if (this.bigErrors >= need && since > gap && !busy) {
           this.resyncExact();
@@ -1420,10 +1598,7 @@ export class P2PSpeakerClient {
 
       // Proportional, capped at 0.5%: closes 100 ms in about 20 s without a
       // pitch change anyone can hear, and never interrupts the waveform.
-      // While settling, allow a 2 % ramp: it closes 100 ms in five seconds
-      // and a brief 2 % pitch shift is far less noticeable than a restart.
-      const cap = settling ? 0.02 : 0.005;
-      const rate = Math.abs(e) < 0.012 ? 1 : 1 - Math.max(-cap, Math.min(cap, e * (settling ? 0.25 : 0.05)));
+      const rate = Math.abs(e) < 0.012 ? 1 : 1 - Math.max(-0.005, Math.min(0.005, e * 0.05));
       a.playbackRate = rate;
       this.set({ position: a.currentTime, driftMs: Math.round(e * 1000), phase: 'PLAYING' });
       return;
@@ -1464,12 +1639,15 @@ export class P2PSpeakerClient {
 
   disconnect() {
     this.closed = true;
+    this.started = false;
+    this.clearConnTimers();
     this.timers.forEach((t) => { window.clearTimeout(t); window.clearInterval(t); });
     if (this.playTimer) window.clearTimeout(this.playTimer);
     try { this.conn?.close(); } catch {}
     try { this.peer?.destroy(); } catch {}
     try { this.el?.pause(); } catch {}
     this.wa?.dispose();
+    this.mem.clear(); this.decodedBufs.clear(); this.decodeJobs.clear();
     try { void this.ctx?.close(); } catch {}
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
     this.set({ conn: 'disconnected', phase: 'DISCONNECTED' });

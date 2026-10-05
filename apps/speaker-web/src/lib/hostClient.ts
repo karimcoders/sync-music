@@ -56,12 +56,15 @@ export class HostClient {
     uploading: false, busy: false, error: null, info: null,
   };
 
-  constructor(private onChange: (s: HostState) => void) {
+  private listeners = new Set<(s: HostState) => void>();
+  subscribe(fn: (s: HostState) => void) { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
+  constructor(onChange: (s: HostState) => void) {
+    this.listeners.add(onChange);
     const t = window.setInterval(() => this.tick(), 250);
     this.timers.push(t);
   }
 
-  private set(p: Partial<HostState>) { this.state = { ...this.state, ...p }; this.onChange(this.state); }
+  private set(p: Partial<HostState>) { this.state = { ...this.state, ...p }; this.listeners.forEach((fn) => fn(this.state)); }
 
   get saved() {
     try { return JSON.parse(localStorage.getItem(STORE) || 'null') as { sessionId: string; token: string } | null; }

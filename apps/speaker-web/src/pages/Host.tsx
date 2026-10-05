@@ -5,6 +5,7 @@ import { detectMode, type Mode } from '../lib/mode';
 import { backendOrigin } from '../lib/backend';
 import JoinCard from '../components/JoinCard';
 import { lock } from '../lib/auth';
+import { acquireHost, shutdownHost } from '../lib/p2p/hostSingleton';
 import { videoIdFrom } from '../lib/audio/youtube';
 import { AppBar, Artwork, Button, Card, Icons, Equalizer, Field, Logo, Meter, Row, RoundBtn, Scrubber, Shell, Stack, Status, fmtTime , useMood } from '../ui';
 
@@ -23,21 +24,26 @@ export default function Host({ go }: { go: (p: string) => void }) {
 
   useEffect(() => {
     let disposed = false;
-    let created: AnyHost | null = null;
+    let release = () => {};
     void detectMode().then((m) => {
       if (disposed) return;
       setMode(m);
-      const c: AnyHost = m === 'direct'
-        ? new P2PHostClient((st) => setS({ ...st }))
-        : new HostClient((st) => setS({ ...st }));
-      created = c;
+      // The host (the room itself) lives in hostSingleton, NOT in this page.
+      // The page used to dispose it on unmount, and disposing destroys the
+      // peer: the moment the host tapped MIXER / SPEAKER / SOUND the room
+      // vanished and every phone dropped out of it.
+      const { client, fresh, release: off } = acquireHost(m, (st) => setS({ ...st }));
+      const c = client as AnyHost;
+      release = off;
       ref.current = c;
       (window as any).__syncHost = c; // diagnostics / e2e only
       setS({ ...c.state });
-      const saved = c.saved;
-      if (saved) c.attach(saved.sessionId, saved.token); // survives a refresh
+      if (fresh) {
+        const saved = c.saved;
+        if (saved) c.attach(saved.sessionId, saved.token); // survives a refresh
+      }
     });
-    return () => { disposed = true; created?.dispose(); };
+    return () => { disposed = true; release(); };
   }, []);
 
   const c = ref.current;
@@ -329,7 +335,7 @@ export default function Host({ go }: { go: (p: string) => void }) {
       <Button variant="danger" onClick={() => c?.end()}>END SESSION</Button>
       <Row style={{ justifyContent: 'center', gap: 10 }}>
         <button className="chip" onClick={() => go('/')}>← Home</button>
-        <button className="chip" data-testid="sign-out" onClick={() => { lock(); go('/'); }}>Sign out</button>
+        <button className="chip" data-testid="sign-out" onClick={() => { shutdownHost(); lock(); go('/'); }}>Sign out</button>
       </Row>
       <div className="footer-note">build {__BUILD__}</div>
     </Shell>

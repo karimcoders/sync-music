@@ -5,7 +5,7 @@ import { detectMode, roomParam, type Mode } from '../lib/mode';
 import { FIXED_ROOM_ID, roomIdFromCode } from '../lib/p2p/messages';
 import QrScanner from '../components/QrScanner';
 import { backendOrigin, setBackend } from '../lib/backend';
-import { setSpeaker } from '../lib/p2p/speakerSingleton';
+import { acquireSpeaker, leaveSpeaker } from '../lib/p2p/speakerSingleton';
 import { AppBar, Button, Card, Equalizer, Logo, Meter, Row, Shell, Stack, Status, fmtTime, Icons , useMood } from '../ui';
 
 type Discovered = { sessionId: string; name: string; speakerCount: number; hostOnline: boolean };
@@ -39,15 +39,13 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
 
   useEffect(() => {
     if (!room && mode !== 'server') return;   // direct mode: wait for a QR/code
-    // A link that carries ?h=<room> means the host has no backend and is
-    // serving the session straight from its own browser (direct mode).
-    const c: SpeakerClient | P2PSpeakerClient = room
-      ? new P2PSpeakerClient(room, (st) => setS({ ...st }))
-      : new SpeakerClient((st) => setS({ ...st }));
+    // The client lives in speakerSingleton, NOT in this page. This page used
+    // to create it on mount and disconnect it on unmount, so tapping the
+    // MIXER tab dropped the phone out of the room and tore its audio down —
+    // the mixer then had nothing to control. Now the page only watches it.
+    const { client: c, release } = acquireSpeaker(room, (st) => setS({ ...st }));
     ref.current = c;
     (window as any).__syncClient = c; // diagnostics / e2e only
-    // only the direct-mode client owns a Web Audio graph to mix
-    setSpeaker(c instanceof P2PSpeakerClient ? c : null);
     setS({ ...c.state });
     let stopped = false;
     const look = async () => {
@@ -64,7 +62,7 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
     };
     void look();
     const iv = window.setInterval(() => { if (!ref.current?.state.sessionId) void look(); }, 4000);
-    return () => { stopped = true; window.clearInterval(iv); setSpeaker(null); c.disconnect(); };
+    return () => { stopped = true; window.clearInterval(iv); release(); };
   }, [room, mode]);
 
   const c = ref.current;
@@ -164,6 +162,7 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
               </Card>
             ))}
             {s.error && <div className="err-text">{s.error}</div>}
+            <Diag lines={s.diag} />
 
             <Button testId="scan-qr" variant="ghost" onClick={() => setScanning(true)}>
               📷  SCAN THE HOST’S QR CODE
@@ -295,6 +294,20 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
         </Card>
       )}
 
+      {s.hostBuild && (
+        <Card>
+          <Stack gap={8}>
+            <div className="warn-text" data-testid="version-mismatch">
+              The host runs a different version of the app ({s.hostBuild}) than this phone ({__BUILD__}).
+              Different versions can behave differently from each other.
+            </div>
+            {s.hostBuild > __BUILD__
+              ? <Button variant="ghost" onClick={() => void refreshApp()}>UPDATE THIS PHONE</Button>
+              : <div className="tiny">The host is on the OLDER one — reload the host page.</div>}
+          </Stack>
+        </Card>
+      )}
+
       {(s.error || s.info) && (
         <Card>
           <Stack gap={10}>
@@ -304,11 +317,36 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
           </Stack>
         </Card>
       )}
+      {s.conn !== 'connected' && <Card><Diag lines={s.diag} /></Card>}
+      <Row style={{ justifyContent: 'center', gap: 10 }}>
+        <button className="chip" data-testid="leave-room" onClick={() => { leaveSpeaker(); go('/'); }}>Leave this room</button>
+      </Row>
       <div className="footer-note">
         Host controls everything · you only need this tab open · build {__BUILD__}
       </div>
     </Shell>
   );
+}
+
+/** Plain-language connection progress: what is being tried, and where it is stuck. */
+function Diag({ lines }: { lines?: string[] }) {
+  if (!lines?.length) return null;
+  return (
+    <div className="tiny mono" data-testid="conn-diag" style={{ textAlign: 'left', opacity: 0.8, lineHeight: 1.6 }}>
+      {lines.map((l) => <div key={l}>{l}</div>)}
+    </div>
+  );
+}
+
+/** Drop the cached app shell (never the downloaded songs) and load the newest build. */
+async function refreshApp() {
+  try {
+    const regs = (await navigator.serviceWorker?.getRegistrations?.()) ?? [];
+    await Promise.all(regs.map((r) => r.unregister()));
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((k) => k.startsWith('sync-music-shell')).map((k) => caches.delete(k)));
+  } catch { /* reload anyway */ }
+  location.reload();
 }
 
 /**

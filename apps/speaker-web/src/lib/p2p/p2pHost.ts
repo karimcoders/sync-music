@@ -36,7 +36,7 @@ interface Conn {
 }
 
 /** One transfer. Several callers asking for the same file share one job. */
-interface Job { trackId: string; force: boolean; waiters: Array<() => void> }
+interface Job { trackId: string; force: boolean; urgent: boolean; waiters: Array<() => void> }
 /** Per-phone send queue: a priority lane for the song being played, and a background lane. */
 interface Outbox { urgent: Job[]; normal: Job[]; running: boolean; current: Job | null }
 
@@ -83,7 +83,10 @@ export class P2PHostClient {
   /** peers that told us their own clock estimate has settled */
   private clockReady = new Map<string, boolean>();
 
-  constructor(private onChange: (s: HostState) => void) {
+  private listeners = new Set<(s: HostState) => void>();
+  subscribe(fn: (s: HostState) => void) { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
+  constructor(onChange: (s: HostState) => void) {
+    this.listeners.add(onChange);
     this.timers.push(window.setInterval(() => this.tick(), 250));
     // Measure every speaker's latency ourselves — the correction loop below is
     // only trustworthy if the round-trip is known on THIS clock.
@@ -121,8 +124,7 @@ export class P2PHostClient {
     });
   }
 
-  private set(p: Partial<HostState>) { this.state = { ...this.state, ...p }; this.onChange(this.state); }
-
+  private set(p: Partial<HostState>) { this.state = { ...this.state, ...p }; this.listeners.forEach((fn) => fn(this.state)); }
   /** a note of the position every couple of seconds, so a crash loses little */
   private rememberTimer = window.setInterval(() => {
     if (this.transport.state === 'playing') this.rememberPlayback();
@@ -484,6 +486,7 @@ export class P2PHostClient {
         (m.cached ?? []).forEach((id) => { c.sent.add(id); c.have.add(id); });
         this.urls.forEach((_u, id) => this.sendUrl(c.conn, id));
         this.prefetch(peerId);
+        this.send(c.conn, { type: 'BUILD', build: __BUILD__ });
         this.hintNext(peerId);
         this.sendYtTo(c.conn);
         break;
@@ -701,17 +704,27 @@ export class P2PHostClient {
    * song gets it the old way — late, but certain.
    */
   private async backstopTransfer(trackId: string, graceMs = 6000) {
-    await new Promise((r) => setTimeout(r, graceMs));
-    const missing = [...this.conns.entries()].filter(([, c]) => !c.have.has(trackId));
-    if (!missing.length) return;
-    this.set({ info: `${missing.length} phone(s) could not fetch it — sending directly.` });
-    await Promise.all(missing.map(([p]) => this.enqueueTrack(p, trackId, { urgent: true })));
+    if (this.backstops.has(trackId)) return;
+    this.backstops.add(trackId);
+    try {
+      await new Promise((r) => setTimeout(r, graceMs));
+      const missing = [...this.conns.entries()].filter(([, c]) => !c.have.has(trackId));
+      if (!missing.length) return;
+      this.set({ info: `${missing.length} phone(s) could not fetch it — sending directly.` });
+      await Promise.all(missing.map(([p]) => this.enqueueTrack(p, trackId, { urgent: true })));
+    } finally { this.backstops.delete(trackId); }
   }
 
+  private urlSent = new WeakMap<DataConnection, Set<string>>();
   private sendUrl(conn: DataConnection, trackId: string) {
     const url = this.urls.get(trackId);
     const f = this.files.get(trackId);
     if (!url || !f) return;
+    // once per connection: prefetch runs often and the phone only needs to be told once
+    let done = this.urlSent.get(conn);
+    if (!done) { done = new Set(); this.urlSent.set(conn, done); }
+    if (done.has(trackId)) return;
+    done.add(trackId);
     this.send(conn, {
       type: 'TRACK_URL', trackId, url,
       title: f.track?.title ?? 'Track', mime: f.mime,
@@ -734,19 +747,17 @@ export class P2PHostClient {
         id, title: track.title, artist: track.artist, filename: track.filename,
         mimeType: track.mimeType, size: track.size, duration, bytes,
       });
+      // With cloud delivery on, this song must NOT also be pushed phone by
+      // phone while it uploads: both would share one uplink and be slower.
+      if (this.cloud) this.cloudPending.add(id);
       this.transport = { ...this.transport, playlist: [...this.transport.playlist, track] };
       this.conns.forEach((_c, p) => this.prefetch(p));
       if (this.transport.trackIndex < 0) this.transport = { ...this.transport, trackIndex: 0, trackId: id };
       this.pushTransport();
       this.hintNext();
       if (this.cloud) {
-        // Do ONE thing at a time with this phone's uplink. Uploading to the
-        // cloud while also pushing the same megabytes to every speaker made
-        // both slower — they were splitting the same connection. So: upload
-        // once, let the phones pull it themselves, and only fall back to the
-        // phone-to-phone push for whoever still has not got it.
         this.set({ info: `Uploading “${track.title}” once…` });
-        await this.publishToCloud(id);
+        try { await this.publishToCloud(id); } finally { this.cloudPending.delete(id); }
         this.set({ info: 'Phones are downloading it directly.' });
         void this.backstopTransfer(id);
       } else {
@@ -760,27 +771,19 @@ export class P2PHostClient {
   }
 
   /**
-   * Ship the current track to one speaker in paced 64 kB chunks.
+   * Per-phone send queue with a priority lane.
+   *
+   * This used to be ONE promise chain for the whole room. The song you had
+   * just chosen was appended to the END of it, behind the background prefetch
+   * of every other song to every other phone, so with a few phones and a
+   * playlist the new song could wait minutes — "song change is not instant".
+   * Now every phone has its own queue and the song being played goes into the
+   * priority lane, pre-empting any background transfer; the interrupted one
+   * resumes right after. (The host has one uplink, but a phone should never
+   * wait for a DIFFERENT phone's background download.)
    *
    * Handing PeerJS one multi-megabyte buffer blocks that data channel for
-   * seconds: control messages queue up behind it and the phones that are still
-   * downloading stutter. Pacing against `bufferedAmount` keeps the channel
-   * responsive while the file streams.
-   */
-  /**
-   * Transfers are serialised. The host has ONE uplink: sending the same file to
-   * three phones at once simply makes all three slower, and the saturated
-   * channels then delay the PLAY/PAUSE messages — which is exactly what the
-   * stuttering felt like.
-   */
-  /**
-   * One queue PER PHONE, not one global queue.
-   *
-   * The old single queue meant a slow phone downloading a 9 MB song blocked
-   * every other phone's transfer behind it, so "switch song" took as long as
-   * the slowest link times the number of phones. Each phone now drains its
-   * own queue, and each queue has an urgent lane (the song being played) that
-   * is served before the background prefetch.
+   * seconds, so files are sent in paced 32 kB chunks against `bufferedAmount`.
    */
   private outbox = new Map<string, Outbox>();
   /** the file currently streaming to each phone */
@@ -788,73 +791,70 @@ export class P2PHostClient {
   /** which physical phone is behind each peer connection */
   private deviceOf = new Map<string, string>();
 
-  /**
-   * Ask for a file to go to a phone. Resolves when it has been sent (or when
-   * it is clear it will not be). Asking twice for the same file joins the
-   * existing job instead of starting a second copy.
-   */
-  private enqueueTrack(peerId: string, trackId?: string, opts: { urgent?: boolean; force?: boolean } = {}) {
-    const id = trackId ?? this.transport.playlist[this.transport.trackIndex]?.id;
-    if (!id) return Promise.resolve();
-    const c = this.conns.get(peerId);
-    if (!c) return Promise.resolve();
-    if (!opts.force && c.sent.has(id)) return Promise.resolve();
+  private enqueueTrack(peerId: string, trackId: string, opts: { urgent?: boolean; force?: boolean } = {}): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const c = this.conns.get(peerId);
+      if (!c || !this.files.has(trackId)) { resolve(); return; }
+      let ob = this.outbox.get(peerId);
+      if (!ob) { ob = { urgent: [], normal: [], running: false, current: null }; this.outbox.set(peerId, ob); }
 
-    let box = this.outbox.get(peerId);
-    if (!box) { box = { urgent: [], normal: [], running: false, current: null }; this.outbox.set(peerId, box); }
-
-    // already queued? promote it if this request is the urgent one, and wait on it
-    const found = [...box.urgent, ...box.normal].find((j) => j.trackId === id);
-    if (found) {
-      if (opts.urgent && !box.urgent.includes(found)) {
-        box.normal.splice(box.normal.indexOf(found), 1);
-        box.urgent.push(found);
+      // already streaming or queued: join that job instead of sending twice
+      const queued = ob.urgent.find((j) => j.trackId === trackId) ?? ob.normal.find((j) => j.trackId === trackId);
+      const existing = ob.current?.trackId === trackId ? ob.current : queued;
+      if (existing) {
+        existing.waiters.push(resolve);
+        if (opts.force && existing !== ob.current) existing.force = true;
+        if (opts.urgent && queued && !ob.urgent.includes(queued)) this.promote(ob, queued);
+        void this.pump(peerId);
+        return;
       }
-      found.force ||= !!opts.force;
-      return new Promise<void>((r) => found.waiters.push(r));
-    }
-    // already streaming it? just wait for it to finish
-    if (box.current?.trackId === id) return new Promise<void>((r) => box!.current!.waiters.push(r));
+      if (!opts.force && (c.sent.has(trackId) || c.have.has(trackId))) { resolve(); return; }
 
-    const job: Job = { trackId: id, force: !!opts.force, waiters: [] };
-    (opts.urgent ? box.urgent : box.normal).push(job);
-    const done = new Promise<void>((r) => job.waiters.push(r));
-    void this.drain(peerId);
-    return done;
+      const job: Job = { trackId, force: !!opts.force, urgent: false, waiters: [resolve] };
+      if (opts.urgent) this.promote(ob, job); else ob.normal.push(job);
+      void this.pump(peerId);
+    });
   }
 
-  private async drain(peerId: string) {
-    const box = this.outbox.get(peerId);
-    if (!box || box.running) return;
-    box.running = true;
+  /** Put a job in the priority lane; whatever was there before drops back to the background lane. */
+  private promote(ob: Outbox, job: Job) {
+    ob.normal = ob.normal.filter((j) => j !== job);
+    const demoted = ob.urgent.splice(0);
+    demoted.forEach((j) => { j.urgent = false; });
+    ob.normal.unshift(...demoted);
+    job.urgent = true;
+    ob.urgent.push(job);
+  }
+
+  private async pump(peerId: string) {
+    const ob = this.outbox.get(peerId);
+    if (!ob || ob.running) return;
+    ob.running = true;
     try {
       for (;;) {
-        const job = box.urgent.shift() ?? box.normal.shift();
+        const job = ob.urgent.shift() ?? ob.normal.shift();
         if (!job) break;
-        if (!this.conns.has(peerId)) { job.waiters.forEach((w) => w()); break; }
-        box.current = job;
-        try { await this.sendTrack(peerId, job.trackId, job.force); }
-        catch { /* a dead connection must not wedge the queue */ }
-        box.current = null;
+        ob.current = job;
+        let finished = true;
+        try { finished = await this.sendTrack(peerId, job.trackId, job.force); } catch { finished = true; }
+        ob.current = null;
+        if (!finished && this.conns.has(peerId)) {
+          // pre-empted by a more urgent song: pick this one up again right after it
+          job.force = true;
+          ob.normal.unshift(job);
+          continue;
+        }
         job.waiters.forEach((w) => w());
       }
     } finally {
-      box.running = false;
-      // a job added while we were on the last line would otherwise sit forever
-      if (box.urgent.length || box.normal.length) void this.drain(peerId);
+      ob.running = false;
+      ob.current = null;
+      // the phone is gone: nobody should keep waiting on its queue
+      if (!this.conns.has(peerId)) {
+        [...ob.urgent, ...ob.normal].forEach((j) => j.waiters.forEach((w) => w()));
+        ob.urgent = []; ob.normal = [];
+      }
     }
-  }
-
-  /**
-   * Tell every phone which song is next so it can decode it in the
-   * background. Decoding a 4-minute MP3 costs a second or two on a cheap
-   * phone; doing it BEFORE the switch is what makes the switch feel instant.
-   */
-  private hintNext(peerId?: string) {
-    const pl = this.transport.playlist;
-    const next = pl.length ? pl[(this.transport.trackIndex + 1) % pl.length]?.id ?? null : null;
-    const targets = peerId ? [this.conns.get(peerId)].filter(Boolean) : [...this.conns.values()];
-    targets.forEach((c) => { try { this.send(c!.conn, { type: 'NEXT_HINT', trackId: next }); } catch {} });
   }
 
   /** Re-send only the chunks a speaker reports as missing. */
@@ -874,47 +874,70 @@ export class P2PHostClient {
   }
 
   /**
-   * Send this phone every song it is missing, current one first, before it is
-   * ever asked to play them. A speaker that already holds the bytes starts
-   * instantly and does not care how slow its connection is.
+   * Send this phone every song it is missing, before it is ever asked to play
+   * them, in the order they will be played: the current one, then the ones
+   * coming up, then the ones already behind us. A speaker that already holds
+   * the bytes starts instantly and does not care how slow its link is.
    */
   private prefetch(peerId: string) {
-    const order = [
-      this.transport.playlist[this.transport.trackIndex],
-      ...this.transport.playlist,
-    ].filter(Boolean) as AudioTrack[];
-    const c = this.conns.get(peerId);
-    order.forEach((t, i) => {
-      // already in the cloud? the phone fetches it itself, far faster than we
-      // could push it, and the backstop covers a phone that cannot.
-      if (this.urls.has(t.id)) {
-        if (c) this.sendUrl(c.conn, t.id);
-        void this.backstopTransfer(t.id, i === 0 ? 8000 : 20000);
-        return;
-      }
-      // the song that is playing jumps the queue; the rest fills in behind it
-      void this.enqueueTrack(peerId, t.id, { urgent: i === 0 });
+    const pl = this.transport.playlist;
+    if (!pl.length) return;
+    const start = Math.max(0, this.transport.trackIndex);
+    [...pl.slice(start), ...pl.slice(0, start)].forEach((t, i) => {
+      if (this.cloudPending.has(t.id)) return;          // being uploaded right now
+      void this.deliver(peerId, t.id, false, i === 0 ? 8000 : 20000);
     });
   }
 
-  private async sendTrack(peerId: string, trackId?: string, force = false) {
+  /** songs whose cloud upload is still running (do not push them phone by phone meanwhile) */
+  private cloudPending = new Set<string>();
+  private backstops = new Set<string>();
+
+  /**
+   * Get one song to one phone the cheapest way. If it is already in the
+   * cloud the phone pulls it itself — far faster than this phone's single
+   * uplink could push it — and the backstop covers a phone that cannot.
+   */
+  private deliver(peerId: string, trackId: string, urgent: boolean, graceMs = 8000): Promise<void> {
     const c = this.conns.get(peerId);
-    const cur = trackId
-      ? this.transport.playlist.find((t) => t.id === trackId)
-      : this.transport.playlist[this.transport.trackIndex];
-    if (!c || !cur) return;
-    const f = this.files.get(cur.id);
-    if (!f) return;
-    if (c.sent.has(cur.id) && !force) return;
-    // it already told us it holds this song (usually because it pulled the
-    // cloud copy while we were queueing): sending it again is pure waste
-    if (c.have.has(cur.id)) { c.sent.add(cur.id); return; }
+    if (!c) return Promise.resolve();
+    if (this.urls.has(trackId) && !c.have.has(trackId)) {
+      this.sendUrl(c.conn, trackId);
+      void this.backstopTransfer(trackId, graceMs);
+      return Promise.resolve();
+    }
+    return this.enqueueTrack(peerId, trackId, { urgent });
+  }
+
+  /** Tell phones which song is next so they can decode it in the background. */
+  private hintNext(peerId?: string) {
+    const next = this.transport.playlist[this.transport.trackIndex + 1]?.id ?? null;
+    const msg: P2PMessage = { type: 'NEXT_HINT', trackId: next };
+    if (peerId) { const c = this.conns.get(peerId); if (c) this.send(c.conn, msg); }
+    else this.broadcast(msg);
+  }
+
+  /** Is ANY phone waiting for (or receiving) the song that was just chosen? */
+  private urgentBusy(): boolean {
+    for (const ob of this.outbox.values()) {
+      if (ob.urgent.length > 0 || ob.current?.urgent) return true;
+    }
+    return false;
+  }
+
+  /** Returns false only when the transfer was pre-empted and must be resumed later. */
+  private async sendTrack(peerId: string, trackId: string, force = false): Promise<boolean> {
+    const c = this.conns.get(peerId);
+    const cur = this.transport.playlist.find((t) => t.id === trackId);
+    const f = this.files.get(trackId);
+    if (!c || !cur || !f) return true;
+    if (c.sent.has(cur.id) && !force) return true;
+    // it already told us it holds this song (usually pulled from the cloud copy)
+    if (c.have.has(cur.id) && !force) { c.sent.add(cur.id); return true; }
     c.sent.add(cur.id);
 
+    const ob = this.outbox.get(peerId);
     this.sending.set(peerId, cur.id);
-    // 32 kB meant ~170 messages per megabyte, each one an await; 128 kB moves
-    // the same bytes with a quarter of the overhead and still interleaves
-    // commands quickly enough.
     const CHUNK = 32 * 1024;
     const total = Math.ceil(f.bytes.byteLength / CHUNK);
     this.send(c.conn, {
@@ -923,34 +946,25 @@ export class P2PHostClient {
     });
 
     for (let i = 0; i < total; i++) {
-      if (!this.conns.has(peerId) || !c.conn.open) { c.sent.delete(cur.id); this.sending.delete(peerId); return; }
-      // somebody is waiting on a different song: drop this background
-      // transfer and let the urgent one run
-      const box = this.outbox.get(peerId);
-      if (box?.urgent.length && box.urgent[0].trackId !== cur.id) {
-        // somebody is waiting on a different song: drop this background
-        // transfer, remember nothing was delivered, and let the urgent one run
-        c.sent.delete(cur.id); this.sending.delete(peerId);
-        void this.enqueueTrack(peerId, cur.id);   // finish it later
-        return;
+      if (!this.conns.has(peerId) || !c.conn.open) { c.sent.delete(cur.id); this.sending.delete(peerId); return true; }
+      // a more urgent song is waiting for this phone: drop the background
+      // transfer now and let the urgent one run
+      if (ob && ob.urgent.length > 0) { c.sent.delete(cur.id); this.sending.delete(peerId); return false; }
+      // The host has ONE uplink. While any phone is waiting for the song that
+      // was just chosen, background transfers (the rest of the playlist, for
+      // every phone) stand aside, so that song gets the whole pipe instead of
+      // a 1/N share of it.
+      if (ob?.current && !ob.current.urgent) {
+        while (this.urgentBusy() && this.conns.has(peerId) && c.conn.open) {
+          await new Promise((r) => setTimeout(r, 60));
+        }
       }
-      // Two things matter and they pull in opposite directions: a command
-      // must never queue behind megabytes of audio, and the track still has
-      // to arrive quickly. So the channel is kept almost empty for a moment
-      // around a transport command, and allowed to run full the rest of the
-      // time.
-      // 48 kB in flight is still ~8 Mbit/s at a 50 ms round trip, so this
-      // costs nothing in practice and it is what keeps a PAUSE from queueing
-      // behind megabytes of audio. (Raising it measurably broke PAUSE.)
-      // No sleep here any more. It used to stall EVERY chunk for 150 ms
-      // whenever a command had just gone out, and with status traffic that
-      // was most of the time — a 5 MB song then took five seconds to reach
-      // one phone. Commands are protected by the shallow queue ceiling in
-      // waitForDrain instead, which costs no throughput.
+      // Commands are protected by the shallow queue ceiling in waitForDrain
+      // (right after a command it drops to ~48 kB), so there is no per-chunk
+      // sleep any more: it stalled every chunk for up to 150 ms.
       await this.waitForDrain(c.conn);
       // hand the main thread back between chunks: the clock replies and the
-      // audio callbacks live there too, and starving them is what turned a
-      // transfer into audible drift
+      // audio callbacks live there too
       if ((i & 7) === 7) await new Promise((r) => setTimeout(r, 0));
       this.send(c.conn, {
         type: 'TRACK_CHUNK', trackId: cur.id, index: i,
@@ -959,6 +973,7 @@ export class P2PHostClient {
     }
     if (this.sending.get(peerId) === cur.id) this.sending.delete(peerId);
     c.doneAt[cur.id] = Date.now();
+    return true;
   }
 
   /**
@@ -1006,6 +1021,7 @@ export class P2PHostClient {
     const trackIndex = curId ? Math.max(0, playlist.findIndex((t) => t.id === curId)) : (playlist.length ? 0 : -1);
     this.transport = { ...this.transport, playlist, trackIndex, trackId: playlist[trackIndex]?.id ?? null };
     this.pushTransport();
+    this.hintNext();
   }
   move(index: number, delta: number) {
     const ids = this.transport.playlist.map((t) => t.id);
@@ -1166,9 +1182,14 @@ export class P2PHostClient {
       position: pos, positionAtServerTime: startAt,
     };
     this.pushTransport();
-    // make sure everybody has the bytes before the scheduled moment
+    // Make sure everybody has the bytes before the scheduled moment. This song
+    // jumps every queue; the rest of the playlist follows in the background.
+    this.conns.forEach((_c, p) => {
+      void this.deliver(p, track.id, true, 6000);
+      this.prefetch(p);
+    });
     this.hintNext();
-    this.conns.forEach((_c, p) => void this.enqueueTrack(p, undefined, { urgent: true }));
+    if (this.ytState.videoId) this.youtube(null, 0, false);   // a song replaces the video everywhere
     this.lastCommandAt = Date.now();
     this.broadcastReliable({ type: 'PLAY', seq: ++this.cmdSeq, trackId: track.id, position: pos, startAt });
     this.applyLocal();
@@ -1222,6 +1243,8 @@ export class P2PHostClient {
    * the position we name.
    */
   youtube(videoId: string | null, position = 0, playing = true) {
+    // the video replaces the song: leaving the transport "playing" made later repairs restart the music under it
+    if (videoId && this.transport.state === 'playing') this.pause();
     this.ytState = { videoId, position, atHostTime: Date.now() + 1200, playing };
     this.lastCommandAt = Date.now();
     this.broadcastReliable({ type: 'YT', seq: ++this.cmdSeq, ...this.ytState });
@@ -1287,10 +1310,8 @@ export class P2PHostClient {
   })();
 
   /**
-   * Set a channel strip for the WHOLE room. The host keeps the master copy in
-   * localStorage so a refresh does not lose the sound of the night, applies it
-   * to its own output, and pushes it to every speaker (and to each new one as
-   * it joins, below).
+   * Set a channel strip for the WHOLE room: remembered across a host refresh,
+   * applied here, and pushed to every speaker (and to each new one as it joins).
    */
   setRoomMix(channel: 'music' | 'voice', settings: Record<string, number | boolean>) {
     const cur = this.roomMix[channel] || {};
@@ -1334,6 +1355,7 @@ export class P2PHostClient {
     this.applyLocal();
     this.conns.forEach((c) => { try { c.conn.close(); } catch {} });
     this.conns.clear();
+    this.outbox.clear(); this.sending.clear();
     try { this.peer?.destroy(); } catch {}
     localStorage.removeItem(STORE);
     void clearTracks();
@@ -1342,6 +1364,7 @@ export class P2PHostClient {
   }
 
   dispose() {
+    window.clearInterval(this.rememberTimer);
     this.timers.forEach((t) => window.clearInterval(t));
     try { this.peer?.destroy(); } catch {}
   }

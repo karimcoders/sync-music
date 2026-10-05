@@ -815,3 +815,41 @@ strip's output:
 ✓ and brings it back up again
 ✓ a phone joining later inherits the room sound
 ```
+
+## The client outlives the page (and why the mixer felt dead)
+
+The worst of the "mixer does nothing" bugs was not in the mixer at all. The
+Speaker page created the client on mount and called `disconnect()` on unmount,
+and the Host page did the same with `dispose()`. So tapping the MIXER tab tore
+down the connection AND the whole Web Audio graph: the mixer arrived at a
+screen with nothing left to control, and the phone had quietly dropped out of
+the room. On the host side it was worse — disposing destroys the peer, so every
+speaker lost the room the moment the host looked at another tab.
+
+The client now lives in `speakerSingleton` / `hostSingleton`. Pages only WATCH
+it (`subscribe()`), and it stops only on an explicit "Leave this room" or
+"Sign out".
+
+Also merged here: the limiter's two paths used to be open at the same time, so
+the signal was summed with itself and "limiter off" was simply twice as loud;
+exactly one path is open now, with a separate `master` gain for the phone's own
+volume.
+
+On top of that the host still owns the room's desk (`setRoomMix` → `MIX`), so
+the engineer's moves reach every speaker.
+
+Measured on the merged build, in a real browser:
+
+```
+mixer-real-e2e : song through the strip -5.0 dBFS, host gain 0 -> -120.0 dBFS (115.0 dB)
+                 a phone joining later inherits the room sound
+switch-e2e     : every phone followed the switch in 135 ms, spread 4.5 ms
+hostrefresh-e2e: 2/32 silent samples, host back playing, phones 10 ms apart
+nogap-e2e      : 0/24 silent samples, back playing 7.34 s after a speaker refresh
+sound-e2e      : mic live on the speaker, and off again
+p2p-e2e        : spread 9.1 ms after 6 s, no sync-loop restarts, 13.2 ms after a host refresh
+```
+
+One guard had to be put back after the merge: the drift loop must not restart
+playback while a file is still arriving (`busy = !!this.incoming`). Without it
+p2p-e2e measured 7 restarts and 4 audible breaks in 8 s — the chopping.

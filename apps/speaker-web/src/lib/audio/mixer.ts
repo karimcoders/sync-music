@@ -4,8 +4,13 @@
  * This is the signal chain a small desk gives you, built out of Web Audio
  * nodes and inserted between a source and the speaker:
  *
- *   in → [bass] → [mid] → [treble] → [echo send] → [compressor] → [gain] → out
- *                                 ↘ delay → feedback ↗
+ *   in → [bass] → [mid] → [treble] → ┬→ dry ─┬→ [limiter] ─┬→ [level] → [master] → out
+ *                                    └→ echo ─┘  (delay + feedback)
+ *                                       └──────→ [straight] ──┘
+ *
+ * Exactly ONE of the limiter path and the straight path is open at a time.
+ * (Both were open when the limiter was switched off, so the signal was summed
+ * with itself — twice as loud, which is not what "off" means.)
  *
  * Everything here changes the sound on THIS phone only, in real time. Nothing
  * is faked: these are the same filters a hardware channel strip uses.
@@ -64,8 +69,10 @@ export class MixerChannel {
   private delay: DelayNode;
   private feedback: GainNode;
   private comp: DynamicsCompressorNode;
-  private bypass: GainNode;
+  private limited: GainNode;
+  private direct: GainNode;
   private out: GainNode;
+  private master: GainNode;
   private settings: MixerSettings = { ...FLAT };
 
   constructor(private ctx: AudioContext, destination?: AudioNode) {
@@ -95,15 +102,19 @@ export class MixerChannel {
 
     // A limiter, not a "sound enhancer": fast attack, high ratio, just below
     // full scale. Its only job is to catch the peaks that boosting creates.
+    // (Browsers add a little make-up gain to a compressor, about +1.5 dB at
+    // these settings, so the limiter-on path is very slightly louder.)
     this.comp = ctx.createDynamicsCompressor();
-    this.comp.threshold.value = -6;
-    this.comp.knee.value = 6;
-    this.comp.ratio.value = 12;
+    this.comp.threshold.value = -3;
+    this.comp.knee.value = 3;
+    this.comp.ratio.value = 20;
     this.comp.attack.value = 0.003;
     this.comp.release.value = 0.12;
 
-    this.bypass = g();
+    this.limited = g();
+    this.direct = g();
     this.out = g();
+    this.master = g();
 
     this.input.connect(this.bass).connect(this.mid).connect(this.treble);
     this.treble.connect(this.dry);
@@ -112,11 +123,11 @@ export class MixerChannel {
     this.delay.connect(this.feedback).connect(this.delay);   // regeneration
     this.delay.connect(this.dry);
 
-    this.dry.connect(this.comp).connect(this.out);           // limited path
-    this.dry.connect(this.bypass).connect(this.out);         // unlimited path
-    this.bypass.gain.value = 0;
+    this.dry.connect(this.comp).connect(this.limited).connect(this.out);   // limited path
+    this.dry.connect(this.direct).connect(this.out);                        // straight path
+    this.direct.gain.value = 0;
 
-    this.out.connect(destination ?? ctx.destination);
+    this.out.connect(this.master).connect(destination ?? ctx.destination);
     this.apply(this.settings);
   }
 
@@ -152,24 +163,20 @@ export class MixerChannel {
     this.ramp(this.feedback.gain, s.echoFeedback);
     this.ramp(this.send.gain, s.echo);
     this.ramp(this.out.gain, s.gain);
-    // route through the limiter or around it
-    this.ramp(this.comp.threshold, s.limiter ? -6 : 0);
-    this.ramp(this.bypass.gain, s.limiter ? 0 : 1);
-    this.ramp((this.comp as any).__noop ?? this.comp.knee, s.limiter ? 6 : 0);
-    this.dryGain(s.limiter);
+    // exactly one of the two paths is open
+    this.ramp(this.limited.gain, s.limiter ? 1 : 0);
+    this.ramp(this.direct.gain, s.limiter ? 0 : 1);
   }
 
-  private dryGain(limiting: boolean) {
-    // the two paths must not sum: one of them is always silent
-    this.ramp(this.comp.ratio, limiting ? 12 : 1);
-  }
+  /** The phone's own volume / mute for this strip, separate from the mixer's level. */
+  setMaster(v: number) { this.ramp(this.master.gain, clamp(v, 0, 1)); }
 
   /** How hard the limiter is working, in dB — honest feedback for the user. */
-  get reduction() { return Math.abs(this.comp.reduction || 0); }
+  get reduction() { return Math.abs(Number(this.comp.reduction) || 0); }
 
   dispose() {
     [this.input, this.bass, this.mid, this.treble, this.dry, this.send,
-      this.delay, this.feedback, this.comp, this.bypass, this.out]
+      this.delay, this.feedback, this.comp, this.limited, this.direct, this.out, this.master]
       .forEach((n) => { try { n.disconnect(); } catch {} });
   }
 }

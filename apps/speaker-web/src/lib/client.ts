@@ -33,6 +33,10 @@ export interface UiState {
   hostMic?: boolean;
   /** the YouTube video this phone is playing, if any */
   youtubeId?: string | null;
+  /** plain-language connection progress, shown while connecting so it is never a mystery */
+  diag?: string[];
+  /** the host runs a different build of the app than this phone */
+  hostBuild?: string | null;
 }
 
 const DEVICE_KEY = 'sync-music.deviceId';
@@ -83,11 +87,14 @@ export class SpeakerClient {
     clockSynced: false, bufferedPct: 0, error: null, info: null,
   };
 
-  constructor(private onChange: (s: UiState) => void) {}
+  private listeners = new Set<(s: UiState) => void>();
+  constructor(onChange: (s: UiState) => void) { this.listeners.add(onChange); }
+  /** Several screens can watch one running client (it must outlive any single page). */
+  subscribe(fn: (s: UiState) => void) { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
 
   private set(patch: Partial<UiState>) {
     this.state = { ...this.state, ...patch };
-    this.onChange(this.state);
+    this.listeners.forEach((fn) => fn(this.state));
   }
 
   /* --------------------------- discovery --------------------------- */
