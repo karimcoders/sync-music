@@ -867,3 +867,44 @@ now carries its own `rev`, counted separately, and `mixer-real-e2e` asserts it:
 ✓ moving the mixer does not bump the transport sequence (no repair storm)
 ✓ the last mixer move still reached the speaker
 ```
+
+## The advanced desk
+
+The strip is now a full channel, not three tone controls:
+
+```
+in → [HPF] → [LPF] → [EQ ×6 parametric] → [drive] → [compressor]
+     → ┬ dry ┬ delay (time, feedback) ┬ reverb (convolution)
+                                      ↓
+       [stereo width M/S] → [pan] → ┬ [limiter + ceiling] ┬ [level] → [master] → out
+```
+
+Every control is a real Web Audio node, and `tools/mixerpro-e2e.mjs` proves
+each one by feeding a known signal in and measuring the strip's own output —
+a control that measures flat fails the test:
+
+```
+bass 60 Hz 13.2 dB · low-mid 400 Hz 13.6 · mid 1.2 k 14.0 · high-mid 2.8 k 14.0
+presence 6 k 14.0 · treble 9 k 13.6 — and boosting bass moves 6 kHz by 0.0 dB
+high-pass at 400 Hz removes 33.2 dB of 60 Hz; low-pass at 2 k removes 28.5 dB of 9 k
+drive 80: third harmonic of a 300 Hz tone −80.8 → −35.2 dBFS (45.6 dB)
+compressor −30 dB / 12:1 on a hot tone: −0.8 → −9.6 dBFS, meter 24.3 dB
+reverb: −10.6 dBFS still sounding 300 ms after the source stopped
+echo 300 ms: −5.0 dBFS one repeat later
+width 0: a left-only tone gains 24–32 dB in the RIGHT channel (true mono fold)
+meters: silence −120 dBFS → tone −5.8 peak / −8.8 RMS, spectrum 1024 bins
+UI: moving the on-screen high-pass really moved the filter to 400 Hz
+```
+
+Two traps worth remembering. First, the mid/side matrix needs FOUR side gains
+(+side and −side into each output), not two — with two the right channel never
+cancels. Second, a test that changes `echo` to 0 does not silence the delay
+line: whatever is already circulating keeps coming back at the feedback
+setting, and it will contaminate the next measurement. Set `echoFeedback: 0`
+and let it die first.
+
+Honest limits, unchanged: the reverb convolves a SYNTHETIC impulse (shaped
+noise), so it sounds like a room but is not a recording of one; drive is
+deliberate distortion; and there is no noise gate, because a correct one needs
+sample-level logic in an AudioWorklet and a fake gate built from a compressor
+would not gate at all.

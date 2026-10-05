@@ -27,6 +27,7 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
   };
   const [, repaint] = useState(0);
   const [chan, setChan] = useState<Chan>('music');
+  const [sect, setSect] = useState<'eq' | 'dyn' | 'space' | 'out'>('eq');
   const [vals, setVals] = useState<MixerSettings>(() => client?.mixOf('music') ?? { ...FLAT });
   const [reduction, setReduction] = useState(0);
 
@@ -109,46 +110,142 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
           </p>
         )}
 
-        <Stack gap={4} style={{ marginTop: 14 }}>
-          <Knob label="Bass" unit="dB" min={-12} max={12} step={0.5} value={vals.bass}
-                onChange={(v) => set({ bass: v })} testId="bass" />
-          <Knob label="Mid" unit="dB" min={-12} max={12} step={0.5} value={vals.mid}
-                onChange={(v) => set({ mid: v })} testId="mid" />
-          <Knob label="Treble" unit="dB" min={-12} max={12} step={0.5} value={vals.treble}
-                onChange={(v) => set({ treble: v })} testId="treble" />
-          <Knob label="Level" unit="%" min={0} max={200} step={5} value={Math.round(vals.gain * 100)}
-                onChange={(v) => set({ gain: v / 100 })} testId="gain" />
-        </Stack>
+        <Spectrum client={client} chan={chan} />
+        <Levels client={client} chan={chan} />
       </Card>
 
       <Card>
-        <div className="kicker">Echo</div>
-        <Stack gap={4} style={{ marginTop: 10 }}>
-          <Knob label="Amount" unit="%" min={0} max={100} step={1} value={Math.round(vals.echo * 100)}
-                onChange={(v) => set({ echo: v / 100 })} testId="echo" />
-          <Knob label="Time" unit="ms" min={50} max={1000} step={10} value={Math.round(vals.echoTime * 1000)}
-                onChange={(v) => set({ echoTime: v / 1000 })} testId="echo-time" />
-          <Knob label="Repeats" unit="%" min={0} max={90} step={1} value={Math.round(vals.echoFeedback * 100)}
-                onChange={(v) => set({ echoFeedback: v / 100 })} testId="echo-fb" />
-        </Stack>
-      </Card>
-
-      <Card>
-        <Row>
-          <div>
-            <div className="kicker">Limiter</div>
-            <div className="tiny dim">Catches the peaks that boosting creates</div>
-          </div>
-          <button className={`chip ${vals.limiter ? 'active' : ''}`} data-testid="limiter"
-                  onClick={() => set({ limiter: !vals.limiter })}>
-            {vals.limiter ? 'On' : 'Off'}
-          </button>
-        </Row>
-        <div className="tiny" style={{ marginTop: 8 }} data-testid="reduction">
-          {reduction > 0.5
-            ? `Holding back ${reduction} dB right now — the channel is past what the speaker can take cleanly.`
-            : 'Not working — the level is within what the speaker can take.'}
+        <div className="seg" style={{ marginBottom: 12 }}>
+          {(['eq', 'dyn', 'space', 'out'] as const).map((k) => (
+            <button key={k} className={sect === k ? 'on' : ''} data-testid={`sect-${k}`} onClick={() => setSect(k)}>
+              {k === 'eq' ? 'EQ' : k === 'dyn' ? 'DYNAMICS' : k === 'space' ? 'SPACE' : 'OUT'}
+            </button>
+          ))}
         </div>
+
+        {sect === 'eq' && (
+          <Stack gap={4}>
+            <div className="kicker">Filters</div>
+            <Knob label="High-pass" unit="Hz" min={20} max={800} step={5} value={Math.round(vals.hpf)}
+                  onChange={(v) => set({ hpf: v })} testId="hpf" />
+            <Knob label="Low-pass" unit="Hz" min={1000} max={20000} step={100} value={Math.round(vals.lpf)}
+                  onChange={(v) => set({ lpf: v })} testId="lpf" />
+
+            <div className="kicker" style={{ marginTop: 10 }}>6-band parametric EQ</div>
+            <Knob label="1 · Bass (shelf)" unit="dB" min={-18} max={18} step={0.5} value={vals.bass}
+                  onChange={(v) => set({ bass: v })} testId="bass" />
+            <Knob label="1 · Bass freq" unit="Hz" min={40} max={400} step={5} value={Math.round(vals.bassF)}
+                  onChange={(v) => set({ bassF: v })} testId="bass-f" />
+            <Knob label="2 · Low-mid" unit="dB" min={-18} max={18} step={0.5} value={vals.b2g}
+                  onChange={(v) => set({ b2g: v })} testId="b2g" />
+            <Knob label="2 · Low-mid freq" unit="Hz" min={80} max={1000} step={10} value={Math.round(vals.b2f)}
+                  onChange={(v) => set({ b2f: v })} testId="b2f" />
+            <Knob label="3 · Mid" unit="dB" min={-18} max={18} step={0.5} value={vals.mid}
+                  onChange={(v) => set({ mid: v })} testId="mid" />
+            <Knob label="3 · Mid freq" unit="Hz" min={200} max={5000} step={25} value={Math.round(vals.midF)}
+                  onChange={(v) => set({ midF: v })} testId="mid-f" />
+            <Knob label="3 · Mid width (Q)" unit="" min={0.2} max={8} step={0.1} value={vals.midQ}
+                  onChange={(v) => set({ midQ: v })} testId="mid-q" />
+            <Knob label="4 · High-mid" unit="dB" min={-18} max={18} step={0.5} value={vals.b4g}
+                  onChange={(v) => set({ b4g: v })} testId="b4g" />
+            <Knob label="4 · High-mid freq" unit="Hz" min={800} max={8000} step={50} value={Math.round(vals.b4f)}
+                  onChange={(v) => set({ b4f: v })} testId="b4f" />
+            <Knob label="5 · Presence" unit="dB" min={-18} max={18} step={0.5} value={vals.b5g}
+                  onChange={(v) => set({ b5g: v })} testId="b5g" />
+            <Knob label="5 · Presence freq" unit="Hz" min={2000} max={16000} step={100} value={Math.round(vals.b5f)}
+                  onChange={(v) => set({ b5f: v })} testId="b5f" />
+            <Knob label="6 · Treble (shelf)" unit="dB" min={-18} max={18} step={0.5} value={vals.treble}
+                  onChange={(v) => set({ treble: v })} testId="treble" />
+            <Knob label="6 · Treble freq" unit="Hz" min={1500} max={12000} step={100} value={Math.round(vals.trebleF)}
+                  onChange={(v) => set({ trebleF: v })} testId="treble-f" />
+          </Stack>
+        )}
+
+        {sect === 'dyn' && (
+          <Stack gap={4}>
+            <Row>
+              <div>
+                <div className="kicker">Compressor</div>
+                <div className="tiny dim">Evens out loud and quiet — then make it up with gain</div>
+              </div>
+              <button className={`chip ${vals.compOn ? 'active' : ''}`} data-testid="comp-on"
+                      onClick={() => set({ compOn: !vals.compOn })}>{vals.compOn ? 'On' : 'Off'}</button>
+            </Row>
+            <Knob label="Threshold" unit="dB" min={-60} max={0} step={1} value={Math.round(vals.compThreshold)}
+                  onChange={(v) => set({ compThreshold: v })} testId="comp-threshold" />
+            <Knob label="Ratio" unit=":1" min={1} max={20} step={0.5} value={vals.compRatio}
+                  onChange={(v) => set({ compRatio: v })} testId="comp-ratio" />
+            <Knob label="Attack" unit="ms" min={0} max={300} step={1} value={Math.round(vals.compAttack * 1000)}
+                  onChange={(v) => set({ compAttack: v / 1000 })} testId="comp-attack" />
+            <Knob label="Release" unit="ms" min={10} max={1000} step={10} value={Math.round(vals.compRelease * 1000)}
+                  onChange={(v) => set({ compRelease: v / 1000 })} testId="comp-release" />
+            <Knob label="Knee" unit="dB" min={0} max={40} step={1} value={Math.round(vals.compKnee)}
+                  onChange={(v) => set({ compKnee: v })} testId="comp-knee" />
+            <Knob label="Make-up gain" unit="dB" min={0} max={24} step={0.5} value={vals.makeup}
+                  onChange={(v) => set({ makeup: v })} testId="comp-makeup" />
+            <div className="tiny" data-testid="reduction" style={{ marginTop: 6 }}>
+              {reduction > 0.5
+                ? `Compressor is holding back ${reduction} dB right now.`
+                : 'Compressor is not working on the signal at the moment.'}
+            </div>
+
+            <div className="kicker" style={{ marginTop: 12 }}>Drive (saturation)</div>
+            <Knob label="Drive" unit="%" min={0} max={100} step={1} value={Math.round(vals.drive)}
+                  onChange={(v) => set({ drive: v })} testId="drive" />
+            <Knob label="Blend" unit="%" min={0} max={100} step={1} value={Math.round(vals.driveMix * 100)}
+                  onChange={(v) => set({ driveMix: v / 100 })} testId="drive-mix" />
+            <p className="tiny" style={{ margin: '6px 0 0' }}>
+              Drive adds harmonics on purpose — warmth at low settings, grit past about 60.
+            </p>
+          </Stack>
+        )}
+
+        {sect === 'space' && (
+          <Stack gap={4}>
+            <div className="kicker">Echo (delay)</div>
+            <Knob label="Amount" unit="%" min={0} max={100} step={1} value={Math.round(vals.echo * 100)}
+                  onChange={(v) => set({ echo: v / 100 })} testId="echo" />
+            <Knob label="Time" unit="ms" min={20} max={1500} step={10} value={Math.round(vals.echoTime * 1000)}
+                  onChange={(v) => set({ echoTime: v / 1000 })} testId="echo-time" />
+            <Knob label="Repeats" unit="%" min={0} max={90} step={1} value={Math.round(vals.echoFeedback * 100)}
+                  onChange={(v) => set({ echoFeedback: v / 100 })} testId="echo-fb" />
+
+            <div className="kicker" style={{ marginTop: 12 }}>Reverb (room)</div>
+            <Knob label="Amount" unit="%" min={0} max={100} step={1} value={Math.round(vals.reverb * 100)}
+                  onChange={(v) => set({ reverb: v / 100 })} testId="reverb" />
+            <Knob label="Size" unit="s" min={0.3} max={6} step={0.1} value={vals.reverbSize}
+                  onChange={(v) => set({ reverbSize: v })} testId="reverb-size" />
+            <Knob label="Damping" unit="%" min={0} max={100} step={1} value={Math.round(vals.reverbDamp * 100)}
+                  onChange={(v) => set({ reverbDamp: v / 100 })} testId="reverb-damp" />
+            <p className="tiny" style={{ margin: '6px 0 0' }}>
+              The reverb is a convolution of a synthetic room, not a recording of a real hall.
+            </p>
+          </Stack>
+        )}
+
+        {sect === 'out' && (
+          <Stack gap={4}>
+            <div className="kicker">Stereo</div>
+            <Knob label="Width" unit="%" min={0} max={200} step={5} value={Math.round(vals.width * 100)}
+                  onChange={(v) => set({ width: v / 100 })} testId="width" />
+            <Knob label="Pan" unit="" min={-100} max={100} step={5} value={Math.round(vals.pan * 100)}
+                  onChange={(v) => set({ pan: v / 100 })} testId="pan" />
+
+            <div className="kicker" style={{ marginTop: 12 }}>Output</div>
+            <Knob label="Level" unit="%" min={0} max={200} step={5} value={Math.round(vals.gain * 100)}
+                  onChange={(v) => set({ gain: v / 100 })} testId="gain" />
+            <Row style={{ marginTop: 6 }}>
+              <div>
+                <div className="kicker">Limiter</div>
+                <div className="tiny dim">Brickwall on the way out — catches what boosting creates</div>
+              </div>
+              <button className={`chip ${vals.limiter ? 'active' : ''}`} data-testid="limiter"
+                      onClick={() => set({ limiter: !vals.limiter })}>{vals.limiter ? 'On' : 'Off'}</button>
+            </Row>
+            <Knob label="Ceiling" unit="dB" min={-12} max={0} step={0.5} value={vals.ceiling}
+                  onChange={(v) => set({ ceiling: v })} testId="ceiling" />
+          </Stack>
+        )}
       </Card>
 
       <Card>
@@ -179,6 +276,92 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
 
       <button className="chip" style={{ alignSelf: 'center' }} onClick={() => go('/')}>← Home</button>
     </Shell>
+  );
+}
+
+
+/**
+ * Live spectrum of what the strip is actually sending — drawn from the
+ * channel's own analyser, so it shows the result of every control above it.
+ * If the song is silent this is empty; it never animates for show.
+ */
+function Spectrum({ client, chan }: { client: any; chan: Chan }) {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const cv = ref.current;
+    if (!cv) return;
+    const g = cv.getContext('2d');
+    if (!g) return;
+    let raf = 0;
+    let buf: Float32Array | undefined;
+    const draw = () => {
+      raf = requestAnimationFrame(draw);
+      const m = chan === 'music' ? client?.mixers?.music : client?.mixers?.voice;
+      const w = cv.width, h = cv.height;
+      g.clearRect(0, 0, w, h);
+      g.fillStyle = 'rgba(255,255,255,0.04)';
+      g.fillRect(0, 0, w, h);
+      if (!m) return;
+      buf = m.spectrum(buf as any);
+      const bins = buf!.length;
+      const sr = m.analyser.context.sampleRate;
+      const nyq = sr / 2;
+      // logarithmic frequency axis, 30 Hz … 18 kHz, like every real analyser
+      const f0 = 30, f1 = 18000;
+      const bars = 64;
+      for (let i = 0; i < bars; i++) {
+        const fa = f0 * Math.pow(f1 / f0, i / bars);
+        const fb = f0 * Math.pow(f1 / f0, (i + 1) / bars);
+        const ia = Math.max(0, Math.floor((fa / nyq) * bins));
+        const ib = Math.min(bins - 1, Math.ceil((fb / nyq) * bins));
+        let peak = -140;
+        for (let k = ia; k <= ib; k++) peak = Math.max(peak, buf![k]);
+        const v = Math.max(0, Math.min(1, (peak + 90) / 90));
+        const bh = v * h;
+        const x = (i / bars) * w;
+        const bw = w / bars - 1.5;
+        const hue = 190 - v * 150;
+        g.fillStyle = `hsl(${hue} 90% ${35 + v * 25}%)`;
+        g.fillRect(x, h - bh, bw, bh);
+      }
+    };
+    draw();
+    return () => cancelAnimationFrame(raf);
+  }, [client, chan]);
+  return (
+    <canvas ref={ref} width={600} height={140} data-testid="spectrum"
+            style={{ width: '100%', height: 110, marginTop: 12, borderRadius: 10, display: 'block' }} />
+  );
+}
+
+/** Peak and RMS of the strip's output, in dBFS, with a peak hold. */
+function Levels({ client, chan }: { client: any; chan: Chan }) {
+  const [lv, setLv] = useState({ peak: -120, rms: -120 });
+  const hold = useRef(-120);
+  const [held, setHeld] = useState(-120);
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      const m = chan === 'music' ? client?.mixers?.music : client?.mixers?.voice;
+      if (!m) { setLv({ peak: -120, rms: -120 }); return; }
+      const l = m.levels();
+      setLv(l);
+      hold.current = l.peak > hold.current ? l.peak : hold.current - 1.5;
+      setHeld(hold.current);
+    }, 90);
+    return () => window.clearInterval(t);
+  }, [client, chan]);
+  const pct = (db: number) => Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+  return (
+    <div style={{ marginTop: 10 }} data-testid="levels">
+      <div style={{ position: 'relative', height: 10, borderRadius: 6, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+        <div style={{ position: 'absolute', inset: 0, width: `${pct(lv.rms)}%`, background: 'linear-gradient(90deg,#2dd4bf,#f59e0b)' }} />
+        <div style={{ position: 'absolute', top: 0, bottom: 0, left: `${pct(held)}%`, width: 2, background: lv.peak > -1 ? '#ef4444' : '#fff' }} />
+      </div>
+      <div className="tiny dim" style={{ marginTop: 4 }}>
+        peak {lv.peak <= -119 ? '—' : `${lv.peak.toFixed(1)} dB`} · rms {lv.rms <= -119 ? '—' : `${lv.rms.toFixed(1)} dB`}
+        {lv.peak > -0.5 ? ' · clipping' : ''}
+      </div>
+    </div>
   );
 }
 
