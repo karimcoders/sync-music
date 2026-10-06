@@ -770,6 +770,28 @@ export class P2PSpeakerClient {
     this.set({});
   }
 
+  /**
+   * Does this phone take the host's mixer, or keep its own? A phone with a
+   * tinny speaker needs its own curve; without this switch the host's next
+   * slider move overwrote it. Remembered per phone.
+   */
+  private followHost = (() => { try { return localStorage.getItem('sync-music.mixfollow') !== '0'; } catch { return true; } })();
+  /** the room's mix as the host last sent it (kept even while this phone ignores it) */
+  private roomMixLatest: Partial<Record<'music' | 'voice', Partial<MixerSettings>>> = {};
+  get followsHost() { return this.followHost; }
+  setFollowHost(on: boolean) {
+    this.followHost = on;
+    try { localStorage.setItem('sync-music.mixfollow', on ? '1' : '0'); } catch {}
+    if (on) {
+      // rejoin the room's sound right away
+      (['music', 'voice'] as const).forEach((ch) => {
+        const latest = this.roomMixLatest[ch];
+        if (latest && Object.keys(latest).length) this.setMix(ch, latest);
+      });
+    }
+    this.set({});
+  }
+
   mixOf(channel: 'music' | 'voice'): MixerSettings {
     const ch = channel === 'music' ? this.wa?.mixer : this.voiceMixer;
     return ch ? ch.values : loadSettings(channel);
@@ -1115,7 +1137,11 @@ export class P2PSpeakerClient {
       case 'MIX':
         // The host is the sound engineer: its strip wins on every phone.
         // setMix persists it too, so a phone that reloads keeps the room's sound.
-        this.setMix(m.channel, m.settings as Partial<MixerSettings>);
+        // Always remember the room's mix, so "follow the host" can catch up
+        // later; a phone set to "my own mix" keeps its own curve (a tinny
+        // speaker, a corner of the room that needs less bass).
+        this.roomMixLatest[m.channel] = { ...this.roomMixLatest[m.channel], ...(m.settings as Partial<MixerSettings>) };
+        if (this.followHost) this.setMix(m.channel, m.settings as Partial<MixerSettings>);
         break;
 
       case 'BUILD':

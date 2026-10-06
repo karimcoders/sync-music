@@ -73,8 +73,18 @@ export default function Speaker({ go }: { go: (p: string) => void }) {
   useEffect(() => {
     const hb = s?.hostBuild;
     if (!hb || hb <= __BUILD__ || updating.current) return;
+    // At most twice per tab session. If a reload does not actually bring the
+    // newer build (a CDN that has not caught up yet, a host on a preview
+    // deploy), trying forever would reload the page in a loop — so after two
+    // attempts we stop and leave the manual UPDATE NOW button.
+    let tries = 0;
+    try { tries = Number(sessionStorage.getItem('sync-music.autoupdate') || 0); } catch {}
+    if (tries >= 2) return;
     updating.current = true;
-    const t = window.setTimeout(() => { void refreshApp(); }, 1500);
+    const t = window.setTimeout(() => {
+      try { sessionStorage.setItem('sync-music.autoupdate', String(tries + 1)); } catch {}
+      void refreshApp();
+    }, 1500);
     return () => window.clearTimeout(t);
   }, [s?.hostBuild]);
 

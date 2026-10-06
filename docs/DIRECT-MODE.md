@@ -1028,3 +1028,29 @@ that is actually silent.
 
 `tools/steady-e2e.mjs` now freezes the inbound clock for 20 s and fails if the
 phone leaves `connected`. On the previous build: `reconnecting 7/20`. Now: 0/20.
+
+## Whose mixer wins on a speaker phone
+
+The host is the sound engineer, so by default every phone follows the host's
+mixer. But one phone may have a tinny speaker, or stand in a boomy corner, and
+need its own curve — and until now the host's very next slider move silently
+wiped that out.
+
+- Moving a slider **on the phone** switches that phone to **"My own mix"**. The
+  host's later moves are remembered but not applied there.
+- Tapping **"Following host"** rejoins the room's sound and catches up to the
+  mix as it is *now*, not the one from when it stopped following.
+- The choice is kept per phone (`localStorage`), so a reload does not quietly
+  hand the phone back to the host.
+
+Proved by `tools/followhost-e2e.mjs`: host 4 → phone 4; phone sets −3, host
+sends 9 then 12 → phone stays −3; back to following → 12; reload → still its
+own mix.
+
+### The auto-update must not become a reload loop
+
+Reloading once per load looks safe until the reload does **not** bring a newer
+build — a CDN that has not caught up, or a host on a different deploy. Then the
+phone reloads forever. The auto-update now runs at most **twice per tab
+session** (`sessionStorage`); after that it stops and leaves the manual
+**UPDATE NOW** button. Covered by the last two checks of the same test.

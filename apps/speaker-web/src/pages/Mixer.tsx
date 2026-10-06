@@ -27,6 +27,7 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
   };
   const [, repaint] = useState(0);
   const [chan, setChan] = useState<Chan>('music');
+  const following = !!client && !isDesk && client.followsHost;
   const [sect, setSect] = useState<'eq' | 'dyn' | 'space' | 'fx' | 'out'>('eq');
   const [vals, setVals] = useState<MixerSettings>(() => client?.mixOf('music') ?? { ...FLAT });
   const [reduction, setReduction] = useState(0);
@@ -34,7 +35,12 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
   useMood('connected');
 
   // follow the running speaker (it keeps running while this page is open)
-  useEffect(() => client?.subscribe(() => repaint((n) => n + 1)), [client]);
+  // When the host moves a slider the sliders here move with it.
+  useEffect(() => client?.subscribe(() => {
+    repaint((n) => n + 1);
+    const next = client.mixOf(chan);
+    setVals((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+  }), [client, chan]);
 
   useEffect(() => { setVals(client?.mixOf(chan) ?? { ...FLAT }); }, [chan, client]);
 
@@ -47,10 +53,16 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
     return () => window.clearInterval(t);
   }, [chan, client]);
 
+  // A speaker phone that moves a slider by hand is choosing its OWN sound; say
+  // so, instead of letting the host's next move silently undo it.
+  const local = (patch: Partial<MixerSettings>) => {
+    if (client && !isDesk && client.followsHost) client.setFollowHost(false);
+    client?.setMix(chan, patch);
+  };
   const set = (patch: Partial<MixerSettings>) => {
     const next = { ...vals, ...patch };
     setVals(next);
-    client?.setMix(chan, patch);
+    local(patch);
     toRoom(patch);
   };
 
@@ -72,6 +84,24 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
             </div>
             <button className="chip" data-testid="mix-scope" onClick={() => setRoomWide(!roomWide)}>
               {roomWide ? 'All speakers' : 'This phone'}
+            </button>
+          </Row>
+        </Card>
+      )}
+
+      {client && !isDesk && (
+        <Card>
+          <Row>
+            <div>
+              <div className="kicker">Whose sound is this?</div>
+              <div className="tiny" style={{ marginTop: 4 }}>
+                {following
+                  ? 'This phone follows the host’s mixer. Move a slider and it keeps its own sound instead.'
+                  : 'This phone keeps its own sound. The host’s mixer is ignored here.'}
+              </div>
+            </div>
+            <button className="chip" data-testid="mix-follow" onClick={() => client.setFollowHost(!client.followsHost)}>
+              {following ? 'Following host' : 'My own mix'}
             </button>
           </Row>
         </Card>
@@ -302,11 +332,11 @@ export default function Mixer({ go }: { go: (p: string) => void }) {
         <div className="chip-row" style={{ marginTop: 10 }}>
           {Object.keys(PRESETS).map((name) => (
             <button key={name} className="chip" data-testid={`preset-${name}`}
-                    onClick={() => { const p = PRESETS[name]; setVals({ ...vals, ...p }); client?.setMix(chan, p); toRoom(p); }}>
+                    onClick={() => { const p = PRESETS[name]; setVals({ ...vals, ...p }); local(p); toRoom(p); }}>
               {name}
             </button>
           ))}
-          <button className="chip" onClick={() => { setVals({ ...FLAT }); client?.setMix(chan, FLAT); toRoom(FLAT); }}>Reset</button>
+          <button className="chip" onClick={() => { setVals({ ...FLAT }); local(FLAT); toRoom(FLAT); }}>Reset</button>
         </div>
       </Card>
 
